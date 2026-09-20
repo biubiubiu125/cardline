@@ -179,6 +179,7 @@ function buildSub2ApiSample() {
         source: 'sample-data',
         two_factor_enabled: true,
         two_factor_status: 'enabled',
+        two_factor_error: '',
       },
     };
   });

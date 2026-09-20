@@ -1,6 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { RedeemService } from './public.service';
+import { RedeemService, type PickupRecordInput } from './public.service';
 
 @Controller('public')
 export class PublicController {
@@ -16,7 +16,7 @@ export class PublicController {
     return this.service.redeem({
       cards: body?.cards as string[],
       format: body?.format as string,
-      limit: Number(body?.limit) || 1,
+      limit: Number(body?.limit) || undefined,
       ip: clientIp(request),
       userAgent: request.headers['user-agent'],
     });
@@ -48,13 +48,11 @@ export class PublicController {
   @HttpCode(200)
   async exportPickup(@Body() body: Record<string, unknown>, @Res() response: Response) {
     const kind = body?.kind === 'email' ? 'email' : 'line';
-    const result =
-      body?.category && body.category !== 'all'
-        ? await this.service.exportPickupClassified({
-            keys: body?.keys as string[],
-            category: String(body.category),
-          })
-        : await this.service.exportPickup({ keys: body?.keys as string[], kind });
+    const result = await this.service.exportPickup({
+      records: body?.records as PickupRecordInput[],
+      kind,
+      category: typeof body?.category === 'string' ? body.category : undefined,
+    });
     response.setHeader('Content-Type', 'text/plain; charset=utf-8');
     response.setHeader(
       'Content-Disposition',

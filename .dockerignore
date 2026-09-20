@@ -10,11 +10,19 @@ npm-debug.log*
 # 本地数据库与密钥
 apps/server/prisma/*.db
 apps/server/prisma/*.db-journal
+apps/server/prisma/*.db-wal
+apps/server/prisma/*.db-shm
 apps/server/.env
+apps/web/.env
 apps/web/.env.local
+.env
 
 # 参考资料 / 截图
 _ref_converter
+sub2api_格式参考.json
+cpa_格式参考.json
+samples/*.local.json
+.tmp-*
 *.png
 *.jpg
 *.jpeg

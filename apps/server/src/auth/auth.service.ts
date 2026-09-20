@@ -33,6 +33,7 @@ export class AuthService {
       sub: user.id,
       username: user.username,
       role: user.role,
+      sessionVersion: user.sessionVersion,
     });
 
     return {
@@ -70,10 +71,16 @@ export class AuthService {
       throw new UnauthorizedException({ code: 'BAD_INPUT', message: '新密码至少 6 位' });
     }
 
-    await this.prisma.adminUser.update({
-      where: { id: user.id },
-      data: { passwordHash: await bcrypt.hash(String(newPassword), 10) },
+    const updated = await this.prisma.adminUser.updateMany({
+      where: { id: user.id, passwordHash: user.passwordHash, sessionVersion: user.sessionVersion },
+      data: {
+        passwordHash: await bcrypt.hash(String(newPassword), 10),
+        sessionVersion: { increment: 1 },
+      },
     });
+    if (updated.count !== 1) {
+      throw new UnauthorizedException({ code: 'UNAUTHORIZED', message: '密码已变更，请重新登录' });
+    }
     return { ok: true };
   }
 }

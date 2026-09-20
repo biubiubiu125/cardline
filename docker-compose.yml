@@ -14,10 +14,10 @@ services:
       PORT: "3000"
       HOST: 0.0.0.0
       DATABASE_URL: "file:/data/cardline.db"
-      JWT_SECRET: "${JWT_SECRET:-cardline-please-change-this-secret}"
+      JWT_SECRET: "${JWT_SECRET:?请设置至少32字符的随机JWT_SECRET}"
       JWT_EXPIRES_IN: "${JWT_EXPIRES_IN:-7d}"
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin123}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?请设置至少12字符的管理员密码}"
       CORS_ORIGIN: "*"
       PICKUP_CONCURRENCY: "${PICKUP_CONCURRENCY:-4}"
       PICKUP_TIMEOUT_MS: "${PICKUP_TIMEOUT_MS:-30000}"

@@ -254,6 +254,33 @@ a:hover {
   gap: 16px;
 }
 
+.site-header__nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  margin-left: 20px;
+}
+
+.site-header__link {
+  padding: 8px 16px;
+  border-radius: 8px;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.site-header__link:hover,
+.site-header__link.is-active {
+  color: var(--brand);
+  background: var(--line-soft);
+}
+
+.site-header__link:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
 .ghost-button {
   display: inline-flex;
   align-items: center;
@@ -1365,7 +1392,28 @@ a:hover {
   }
 
   .site-header__inner {
-    height: 62px;
+    min-height: 62px;
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 12px;
+    padding-bottom: 10px;
+  }
+
+  .site-header__right {
+    margin-left: auto;
+    gap: 8px;
+  }
+
+  .site-header__nav {
+    order: 3;
+    width: 100%;
+    margin: 0;
+  }
+
+  .site-header__link {
+    flex: 1;
+    text-align: center;
   }
 
   .console__field-grid,

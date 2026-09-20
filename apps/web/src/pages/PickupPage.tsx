@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { App as AntApp, Button, Empty, Input, InputNumber, Spin, Tag, Upload } from 'antd';
 import { UploadOutlined } from '@ant-design/icons';
 
@@ -18,7 +18,7 @@ import type {
 } from '../api/types';
 import MailBrowser from '../components/MailBrowser';
 import SiteFooter from '../components/SiteFooter';
-import SiteHeader from '../components/SiteHeader';
+import { useLatestRequest } from '../hooks/useLatestRequest';
 import './PickupPage.css';
 
 const { TextArea } = Input;
@@ -32,30 +32,12 @@ const TEXTAREA_PLACEHOLDER = [
   'abc@outlook.com----password----client-id----refresh-token',
   'def@outlook.com----password----client-id----refresh-token',
   'CARD-XXXXX-XXXXX-XXXXX',
-  'ghi@outlook.com',
 ].join('\n');
 
 const EMPTY_SUMMARY: PickupResolveSummary = { total: 0, complete: 0, incomplete: 0, unknown: 0 };
 
-/** 四段式凭据行：邮箱----密码----clientid----refresh_token */
-const CREDENTIAL_LINE = /^([^\s@]+@[^\s@]+)----(.+)$/;
-
-/** 从文本框与上传文件中提取 `email -> 凭据行` 映射，供取件时精确投递。 */
-function collectCredentialLines(input: string, files: ImportFile[]): Map<string, string> {
-  const map = new Map<string, string>();
-  const sources = [input, ...files.map((file) => file.content)];
-
-  sources.forEach((source) => {
-    source.split(/\r?\n/).forEach((line) => {
-      const text = line.trim();
-      const match = CREDENTIAL_LINE.exec(text);
-      if (!match) return;
-      const email = match[1].toLowerCase();
-      if (!map.has(email)) map.set(email, text);
-    });
-  });
-
-  return map;
+function pickupInput(record: PickupRecord): PickupFetchRecordInput {
+  return { key: record.key, email: record.email, line: record.line, fromCard: record.fromCard };
 }
 
 type PickupPhase = 'idle' | 'resolving' | 'fetching' | 'done' | 'error';
@@ -65,9 +47,12 @@ type PickupPhase = 'idle' | 'resolving' | 'fetching' | 'done' | 'error';
  */
 export default function PickupPage() {
   const { message } = AntApp.useApp();
+  const { begin, isCurrent, invalidate } = useLatestRequest();
 
   const [input, setInput] = useState('');
   const [files, setFiles] = useState<ImportFile[]>([]);
+  const fileReadVersion = useRef(0);
+  useEffect(() => () => { fileReadVersion.current++; }, []);
 
   const [records, setRecords] = useState<PickupRecord[]>([]);
   const [summary, setSummary] = useState<PickupResolveSummary>(EMPTY_SUMMARY);
@@ -79,8 +64,6 @@ export default function PickupPage() {
   const [results, setResults] = useState<PickupResult[]>([]);
   const [maxMessages, setMaxMessages] = useState<number>(10);
   const [exporting, setExporting] = useState(false);
-
-  const credentialLines = useMemo(() => collectCredentialLines(input, files), [input, files]);
 
   const completeRecords = useMemo(() => records.filter((item) => item.complete), [records]);
   const incompleteRecords = useMemo(() => records.filter((item) => !item.complete), [records]);
@@ -94,40 +77,20 @@ export default function PickupPage() {
     return { success, failed: results.length - success, banned, withCredits };
   }, [results]);
 
-  const handleFiles = useCallback(
-    async (incoming: File[]) => {
-      for (const file of incoming) {
-        if (file.size > MAX_FILE_SIZE) {
-          void message.error(`${file.name} 超过 8MB 限制`);
-          continue;
-        }
-        try {
-          const content = await file.text();
-          setFiles((previous) =>
-            previous.some((item) => item.name === file.name)
-              ? previous
-              : [...previous, { name: file.name, content }],
-          );
-        } catch {
-          void message.error(`${file.name} 读取失败`);
-        }
-      }
-    },
-    [message],
-  );
-
   const handleResolve = useCallback(async () => {
     if (!input.trim() && files.length === 0) {
       void message.warning('请粘贴账号信息或上传文件');
       return;
     }
 
+    const request = begin();
     setPhase('resolving');
     try {
       const data = await resolvePickup({
         input: input.trim() ? input : undefined,
         files: files.length > 0 ? files : undefined,
       });
+      if (!isCurrent(request)) return;
       setRecords(data.records ?? []);
       setSummary(data.summary ?? EMPTY_SUMMARY);
       setUnknown(data.unknown ?? []);
@@ -137,14 +100,14 @@ export default function PickupPage() {
       setPhase('idle');
       void message.success(`解析完成：共 ${data.summary?.total ?? 0} 个账号`);
     } catch (error) {
+      if (!isCurrent(request)) return;
       setPhase('error');
       void message.error(errorMessage(error));
     }
-  }, [files, input, message]);
+  }, [begin, files, input, isCurrent, message]);
 
-  const handleClear = useCallback(() => {
-    setInput('');
-    setFiles([]);
+  const resetResults = useCallback(() => {
+    invalidate();
     setRecords([]);
     setSummary(EMPTY_SUMMARY);
     setUnknown([]);
@@ -152,7 +115,41 @@ export default function PickupPage() {
     setResults([]);
     setProgress({ done: 0, total: 0 });
     setPhase('idle');
-  }, []);
+    setExporting(false);
+  }, [invalidate]);
+
+  const handleFiles = useCallback(
+    async (incoming: File[]) => {
+      const version = fileReadVersion.current;
+      for (const file of incoming) {
+        if (file.size > MAX_FILE_SIZE) {
+          void message.error(`${file.name} 超过 8MB 限制`);
+          continue;
+        }
+        try {
+          const content = await file.text();
+          if (version !== fileReadVersion.current) return;
+          resetResults();
+          setFiles((previous) =>
+            previous.some((item) => item.name === file.name)
+              ? previous
+              : [...previous, { name: file.name, content }],
+          );
+        } catch {
+          if (version !== fileReadVersion.current) return;
+          void message.error(`${file.name} 读取失败`);
+        }
+      }
+    },
+    [message, resetResults],
+  );
+
+  const handleClear = useCallback(() => {
+    fileReadVersion.current++;
+    resetResults();
+    setInput('');
+    setFiles([]);
+  }, [resetResults]);
 
   const handleFetch = useCallback(async () => {
     if (completeRecords.length === 0) {
@@ -165,6 +162,7 @@ export default function PickupPage() {
       chunks.push(completeRecords.slice(index, index + FETCH_CHUNK_SIZE));
     }
 
+    const request = begin();
     setPhase('fetching');
     setResults([]);
     setProgress({ done: 0, total: completeRecords.length });
@@ -172,13 +170,8 @@ export default function PickupPage() {
     const collected: PickupResult[] = [];
 
     for (const chunk of chunks) {
-      const payloadRecords: PickupFetchRecordInput[] = chunk.map((record) => ({
-        key: record.key,
-        email: record.email,
-        // 只在确实解析出四段式凭据行时才传；卡密/邮箱记录交由服务端回查凭据
-        line: credentialLines.get(record.key) || undefined,
-        fromCard: record.fromCard,
-      }));
+      if (!isCurrent(request)) return;
+      const payloadRecords = chunk.map(pickupInput);
 
       try {
         const data = await fetchPickup({ records: payloadRecords, maxMessages });
@@ -205,6 +198,7 @@ export default function PickupPage() {
         });
       }
 
+      if (!isCurrent(request)) return;
       setResults([...collected]);
       setProgress({ done: collected.length, total: completeRecords.length });
     }
@@ -212,7 +206,7 @@ export default function PickupPage() {
     setPhase('done');
     const failed = collected.filter((item) => !item.ok).length;
     void message.success(`取件完成：成功 ${collected.length - failed} 个，失败 ${failed} 个`);
-  }, [completeRecords, credentialLines, maxMessages, message]);
+  }, [begin, completeRecords, isCurrent, maxMessages, message]);
 
   const handleExport = useCallback(async () => {
     if (records.length === 0) {
@@ -220,20 +214,22 @@ export default function PickupPage() {
       return;
     }
 
+    const request = begin();
     setExporting(true);
     try {
       const { blob, filename } = await exportPickupText({
-        keys: records.map((item) => item.key),
+        records: completeRecords.map(pickupInput),
         kind: 'line',
       });
+      if (!isCurrent(request)) return;
       downloadBlob(blob, filename || 'pickup-export.txt');
       void message.success('导出已开始');
     } catch (error) {
-      void message.error(errorMessage(error));
+      if (isCurrent(request)) void message.error(errorMessage(error));
     } finally {
-      setExporting(false);
+      if (isCurrent(request)) setExporting(false);
     }
-  }, [message, records]);
+  }, [begin, completeRecords, isCurrent, message, records.length]);
 
   const phasePill = (() => {
     if (phase === 'fetching') {
@@ -255,15 +251,13 @@ export default function PickupPage() {
   })();
 
   return (
-    <div className="page">
-      <SiteHeader />
-
+    <>
       <main className="page__body">
         <div className="shell pickup-body">
           <div className="eyebrow">MAILBOX PICKUP</div>
           <h1 className="pickup-title">邮箱取件</h1>
           <p className="pickup-lead">
-            输入卡密、邮箱或 <code className="mono">邮箱----密码----clientid----refresh_token</code>{' '}
+            输入卡密或 <code className="mono">邮箱----密码----clientid----refresh_token</code>{' '}
             凭据行取件；支持粘贴、上传 txt / sub2api JSON。
           </p>
 
@@ -283,7 +277,10 @@ export default function PickupPage() {
                 spellCheck={false}
                 placeholder={TEXTAREA_PLACEHOLDER}
                 value={input}
-                onChange={(event) => setInput(event.target.value)}
+                onChange={(event) => {
+                  resetResults();
+                  setInput(event.target.value);
+                }}
               />
 
               <div className="pickup-controls">
@@ -292,6 +289,7 @@ export default function PickupPage() {
                   showUploadList={false}
                   accept=".txt,.json,.jsonl"
                   beforeUpload={(file) => {
+                    resetResults();
                     void handleFiles([file]);
                     return false;
                   }}
@@ -302,6 +300,7 @@ export default function PickupPage() {
                 <Button
                   type="primary"
                   loading={phase === 'resolving'}
+                  disabled={phase === 'fetching' || exporting}
                   onClick={() => {
                     void handleResolve();
                   }}
@@ -325,9 +324,10 @@ export default function PickupPage() {
                       <Button
                         type="link"
                         size="small"
-                        onClick={() =>
-                          setFiles((previous) => previous.filter((item) => item.name !== file.name))
-                        }
+                        onClick={() => {
+                          resetResults();
+                          setFiles((previous) => previous.filter((item) => item.name !== file.name));
+                        }}
                       >
                         移除
                       </Button>
@@ -476,12 +476,12 @@ export default function PickupPage() {
                 </Button>
                 <Button
                   loading={exporting}
-                  disabled={records.length === 0}
+                  disabled={completeRecords.length === 0 || phase === 'fetching' || phase === 'resolving'}
                   onClick={() => {
                     void handleExport();
                   }}
                 >
-                  导出全部
+                  导出可取件账号
                 </Button>
               </div>
 
@@ -507,6 +507,6 @@ export default function PickupPage() {
       </main>
 
       <SiteFooter />
-    </div>
+    </>
   );
 }

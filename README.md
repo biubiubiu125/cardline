@@ -3,8 +3,9 @@
 输入卡密 → 校验 → 按所选格式生成交付文件；配套邮箱取件与后台账号管理。
 
 - **前台卡密兑换页** `/` — 粘贴卡密、选择交付格式（`sub2api` / `CPA` / `邮箱 TXT`）、生成并下载交付文件
-- **前台邮箱取件页** `/pickup` — 输入卡密 / 邮箱 / `邮箱----密码----clientid----refresh_token` 凭据行，或上传 txt / sub2api JSON 文件取件，自动提取验证码、额度、封禁状态
+- **前台邮箱取件页** `/pickup` — 输入有效卡密 / `邮箱----密码----clientid----refresh_token` 凭据行，或上传 txt / sub2api JSON 文件取件，自动提取验证码、额度、封禁状态
 - **后台管理系统** `/admin` — 账号列表（额度、封禁、兑换状态筛选与排序）、批量导入切割、卡密生成、复制卡密（单张 / 批量）、一键取件弹窗
+- **共享顶部导航**：默认首页为「卡密兑换」，点击「邮箱取件」切换内容，导航栏保持不变
 - **额度全自动**：账号额度不手填，只认邮箱取件命中的额度关键字（档位 = 命中 credits ÷ 25）；未命中的账号为「待定档」，不进兑换池
 
 技术栈：**NestJS + Prisma + SQLite** / **React 18 + Ant Design 5 + Ant Design Pro 组件 + Vite**
@@ -18,8 +19,9 @@
 ### 方式 A：服务器只拉镜像运行（推荐）
 
 ```bash
-# 1. 准备环境变量（可选，不建也能跑）
+# 1. 首次部署复制配置；已有 .env 请直接编辑，勿覆盖
 cp .env.docker.example .env
+# 编辑 .env：JWT_SECRET 填入至少 32 字符的独立随机密钥，ADMIN_PASSWORD 至少 12 字符
 
 # 2. 登录 GHCR（镜像若已设为 public 可跳过这步）
 #    PAT 需要勾选 read:packages 权限
@@ -46,7 +48,7 @@ docker compose up -d --build     # 构建 + 启动
 
 > 部署到服务器时把 `localhost` 换成服务器 IP（或域名）。端口默认 **3010**，要改就在 `.env` 里设 `WEB_PORT`。
 
-默认后台账号 **admin / admin123**（首次启动自动创建，请在 `.env` 里改 `ADMIN_PASSWORD` 后重建，或登录后到「系统设置 → 修改密码」修改）。
+首次启动按 `ADMIN_USERNAME`（默认 `admin`）和 `ADMIN_PASSWORD` 创建管理员。**生产环境必须配置独立的 JWT 密钥及初始密码，否则拒绝启动**。已有管理员的密码不会被环境变量覆盖，请登录后台修改；改密后所有设备需重新登录。旧版本升级前请阅读 [升级说明](docs/UPGRADE.md)。
 
 常用命令：
 
@@ -64,7 +66,7 @@ npm run docker:rebuild   # 本机无缓存重建
 
 - **架构**：`web` 容器（nginx）托管前端静态文件并把 `/api` 反向代理到 `server` 容器（NestJS，3000 端口）。对外只暴露一个端口，无跨域问题。
 - **数据持久化**：SQLite 数据库位于命名卷 `cardline-data` 的 `/data/cardline.db`，容器重建不丢数据。
-- **表结构自动初始化**：`server` 容器启动时执行 `apps/server/scripts/bootstrap-db.js`（幂等 `CREATE TABLE IF NOT EXISTS`），无需 Prisma CLI，也不需要手工迁移。
+- **表结构自动初始化**：`server` 容器启动时执行 `apps/server/scripts/bootstrap-db.js`，按 `SchemaMigration` 版本在事务中建表和补齐旧字段；失败时回滚并阻止启动，无需运行 Prisma CLI。
 - **后端地址可配**：nginx 通过 `CARDLINE_API_UPSTREAM`（默认 `server:3000`）反代，改成 `host.docker.internal:3000` 之类即可指向外部后端。
 - **备份**：`docker run --rm -v cardline-data:/data -v %cd%:/backup alpine tar czf /backup/cardline-backup.tar.gz -C /data .`
 - **改端口**：`.env` 里设 `WEB_PORT`（默认 `3010`，例如 `WEB_PORT=80` 走标准 HTTP 端口）。
@@ -80,10 +82,12 @@ npm run docker:rebuild   # 本机无缓存重建
 
 ### 单容器运行（不用 compose）
 
+先在当前 shell 设置 `JWT_SECRET` 和 `ADMIN_PASSWORD`，满足上述生产要求。
+
 ```bash
 docker build -f docker/Dockerfile.server -t cardline-server .
 docker run -d --name cardline-server -p 3000:3000 \
-  -e JWT_SECRET=your-secret -e ADMIN_PASSWORD=your-password \
+  -e JWT_SECRET="$JWT_SECRET" -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   -v cardline-data:/data cardline-server
 
 docker build -f docker/Dockerfile.web -t cardline-web .
@@ -95,10 +99,13 @@ docker run -d --name cardline-web -p 3010:80 --link cardline-server:server cardl
 ## 二、本地开发
 
 ```bash
-npm install          # 一次装完前后端（npm workspaces）
+npm ci               # 一次装完前后端（npm workspaces）
+# 首次开发复制 apps/server/.env.example 到 apps/server/.env（PowerShell: Copy-Item）
+npx prisma generate --schema apps/server/prisma/schema.prisma
 npm run dev          # 同时启动后端(3000) + 前端(5173)
 ```
 
+- 开发模式可用 `admin/admin123`；未设置有效 JWT_SECRET 时使用进程随机密钥，重启后需要重新登录。生产环境不接受此配置。
 - 前端 http://localhost:5173/ ，`/admin` 进后台，`/api` 由 Vite 代理到后端
 - 数据库文件 `apps/server/prisma/cardline.db`，**首次启动自动建表并写入种子数据**，无需手动迁移
 - 想用 Prisma 的迁移/可视化：`npm run db:push`、`npm run db:studio`
@@ -112,8 +119,11 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 | `npm start` | 只启动已编译的后端 |
 | `npm run db:push` | Prisma 同步表结构 |
 | `npm run db:studio` | Prisma Studio 可视化数据库 |
-| `npm run test:convert` | 格式转换回归测试（10 项） |
-| `npm run test:smoke` | 端到端接口联调测试（85 项，需后端已启动） |
+| `npm run test:convert` | 格式转换回归测试（先编译后端） |
+| `npm run test:security` | 临时 SQLite 安全、迁移和并发兑换回归（先编译后端） |
+| `npm run test:smoke:local` | 自动启动隔离数据库服务，使用脱敏样例和模拟上游执行接口联调 |
+| `npm run test:smoke:local -- --serve` | 联调成功后保留隔离服务及已构建的前端供页面验证，输入 stop 关闭 |
+| `npm run test:smoke` | 对指定后端写入数据的联调；只用于独立测试数据库，可能访问外部取件服务 |
 
 ### 脱敏样例
 
@@ -164,7 +174,9 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 
 - 格式 `CARD-XXXXX-XXXXX-XXXXX`，字符集去掉易混的 `I O 0 1`
 - 一个账号一张卡，前缀/段数/段长可在导入时自定义
-- 首次兑换使用原子更新锁定账号（`unredeemed → redeemed`），之后重复提交只切换格式重新导出，不会多消耗账号
+- 每卡数量由后台 `redeemLimitPerCard` 限制，客户端不能超额领取
+- 首次兑换在同一事务中锁定主账号与附加账号并记录交付归属，重复提交返回同一集合；附加账号自己的卡密不能再领取
+- 已交付账号不能重置为未兑换或重新生成卡密；管理员物理删除会影响历史下载
 - 卡密可在后台「卡密管理」停用
 
 ### 3.3 后台账号列表
@@ -172,9 +184,9 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 - 列：`id`、账号名、**额度（档位）**、卡密、导入时间、封禁状态（已封禁 + 封禁时间 + 原因）、兑换状态（已兑换 + 兑换时间）
 - 全部列可排序；顶部筛选：**额度筛选（含「待定档」）/ 封禁状态筛选 / 兑换状态筛选**，另有卡密、关键词搜索
 - **取件定档**按钮：对「待定档」账号逐个取件，命中额度关键字后自动写回档位（可循环跑完整批）
-- **刷新状态**按钮：勾选「刷新封禁状态 / 刷新兑换状态 / 取件定档」，范围可选「选中的 N 条」或「按当前筛选条件」
+- **刷新状态**按钮：勾选「刷新封禁状态 / 检查账号凭据 / 取件定档」，范围可选「选中的 N 条」或「按当前筛选条件」
   - 封禁状态：官方直连取件 → 扫描最新邮件里的封禁关键词（`account deactivated` / `suspended` / `已停用` / `账号已封禁` …）
-  - 兑换状态：校验账号 `access_token` / `refresh_token`；token 已被轮换说明账号已被使用
+  - 检查账号凭据：只刷新确认过期的 OpenAI token；正常轮换不会改变兑换状态，也不会覆盖封禁结果
 - 操作列：**复制卡密**（记录复制次数）、**取件**（弹窗显示该账号邮箱取件列表与详情，命中额度即定档）、编辑备注、删除
 - **批量复制卡密**（工具栏）：一次复制多张卡密（一行一个，直接进剪贴板），三种范围 —— 勾选行 / 当前页 / 当前筛选结果全部（跨分页，单次上限 5000 条、超出会提示已截断）
 - 列表支持导出为 `sub2api` / `CPA` / `邮箱 TXT`
@@ -207,6 +219,7 @@ MESSAGES_URL = https://outlook.office.com/api/v2.0/me/messages
 SCOPE        = IMAP.AccessAsUser.All + Mail.ReadWrite + offline_access
 ```
 
+- 裸邮箱不能查询库内凭据、取件或导出；需要有效卡密或用户自带完整凭据。自带凭据不会关联或回写库存
 - 用 `client_id` + `refresh_token` 直连微软换 token，再读 Outlook 收件箱
 - 并发 4，单账号超时 30s，最多取最新 10 封（可配）
 - **一次取多个邮箱**：结果区顶部有邮箱切换条（`共 N 个邮箱 · 当前第 M 个`），左侧邮件列表只显示当前邮箱的邮件，点邮箱名即切换；只有一个邮箱时不显示切换条
@@ -270,8 +283,8 @@ A：该卡密对应账号还没从邮件里定出额度（未取件 / 取件成�
 **Q：取件报「换 token 失败（invalid_grant）」？**
 A：该邮箱的 `refresh_token` 已失效或被撤销。系统会把账号标记为「凭据失效」（区别于「已封禁」）。
 
-**Q：刷新兑换状态一直失败？**
-A：兑换状态依赖 `refresh_token` 向 OpenAI 换 token 来判定；如果账号没有 `refresh_token`，只能依据 `access_token` 是否过期判断，接口会返回明确提示。
+**Q：检查账号凭据一直失败？**
+A：此入口检查并刷新过期的 OpenAI 凭据，兑换状态由实际交付决定。有效期未知或缺少 OpenAI `refresh_token` 时会返回原因；微软邮箱 token 不会用于 OpenAI 刷新。
 
 **Q：Docker 里改了 `.env` 不生效？**
 A：`.env` 是 compose 的变量来源，改完执行 `docker compose up -d`（必要时 `--force-recreate`）。

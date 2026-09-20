@@ -107,9 +107,10 @@ export default function AdminLayout() {
         oldPassword: values.oldPassword,
         newPassword: values.newPassword,
       });
-      void message.success('密码已更新');
+      void message.success('密码已更新，请重新登录');
       setPasswordOpen(false);
       form.resetFields();
+      logout();
     } catch (error) {
       void message.error(errorMessage(error));
     } finally {

@@ -47,7 +47,6 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0 \
     DATABASE_URL="file:/data/cardline.db" \
-    JWT_SECRET=change-me-in-production \
     CORS_ORIGIN="*"
 
 # 依赖（含 @prisma/client 生成的引擎）

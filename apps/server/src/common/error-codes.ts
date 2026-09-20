@@ -4,6 +4,7 @@ export type ErrorCode =
   | 'NOT_FOUND'
   | 'CARD_INVALID'
   | 'CARD_DISABLED'
+  | 'CARD_ALLOCATED'
   | 'CREDITS_PENDING'
   | 'NO_STOCK'
   | 'PICKUP_FAILED'

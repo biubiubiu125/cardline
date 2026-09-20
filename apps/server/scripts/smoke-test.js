@@ -17,14 +17,12 @@ const API = process.argv[2] || 'http://127.0.0.1:3000/api';
 /**
  * 样例文件解析：
  *  1. 命令行显式指定
- *  2. 真实参考资料（含真实凭据，已被 .gitignore 排除，本地才有）
- *  3. 脱敏样例 samples/sub2api.sample.json（CI / 克隆仓库后可用）
+ *  2. 脱敏样例 samples/sub2api.sample.json（默认不读取真实凭据）
  */
 function resolveSample() {
   if (process.argv[3]) return process.argv[3];
   const root = path.join(__dirname, '..', '..', '..');
   const candidates = [
-    path.join(root, 'sub2api_格式参考.json'),
     path.join(root, 'samples', 'sub2api.sample.json'),
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
@@ -108,7 +106,7 @@ async function main() {
   token = savedToken;
 
   // -------------------------------------------------------------------------
-  console.log('\n[3] 导入账号（真实 sub2api 样例，额度不手填）');
+  console.log('\n[3] 导入账号（脱敏 sub2api 样例，额度不手填）');
   if (!fs.existsSync(SAMPLE)) {
     bad('样例文件存在', SAMPLE);
   } else {
@@ -253,7 +251,7 @@ async function main() {
         assert(Boolean(notes.two_factor?.secret), 'notes.two_factor.secret（2FA 密钥）保留', notes.two_factor?.secret ? '有' : '缺');
         assert(account.extra?.two_factor_status === 'enabled', 'extra.two_factor_status 保留', JSON.stringify(account.extra?.two_factor_status));
         assert(account.extra?.two_factor_enabled === true, 'extra.two_factor_enabled 保留');
-        assert('two_factor_error' in (account.extra || {}), 'extra 空串字段也原样保留', JSON.stringify(Object.keys(account.extra || {})));
+        assert(account.extra?.two_factor_error === '', 'extra 空串字段也原样保留');
         assert(Boolean(account.extra?.auth_provider), 'extra.auth_provider 保留');
         assert(account.extra?.privacy_mode === 'training_off', 'extra.privacy_mode 保留');
         assert(account.rate_multiplier === 1, 'rate_multiplier 不丢', String(account.rate_multiplier));
@@ -299,7 +297,7 @@ async function main() {
   console.log('\n[7] 前台取件：解析');
   const redeemEmail = await call('POST', '/public/redeem', { cards: [first.cardKey], format: 'email' });
   const emailLine = String(redeemEmail.json.results[0].content).trim().split('\n')[0];
-  assert(emailLine.split('----').length >= 4, '兑换得到的邮箱凭据行可用', emailLine.slice(0, 60));
+  assert(emailLine.split('----').length >= 4, '兑换得到的邮箱凭据行可用');
 
   const resolved = await call('POST', '/public/pickup/resolve', {
     input: `${emailLine}\nnobody@example.com\nnot-a-key`,
@@ -338,19 +336,27 @@ async function main() {
   }
 
   // -------------------------------------------------------------------------
-  console.log('\n[8.1] 前台取件：只传 key（凭据由服务端回查）');
+  console.log('\n[8.1] 前台取件：仅邮箱不具备取件权限');
   const lookupKey = (first.email || first.name || '').toLowerCase();
   console.log(`    传入 key=${lookupKey}`);
   const pureKeyFetch = await call('POST', '/public/pickup/fetch', {
     records: [{ key: lookupKey, email: first.email, line: '', fromCard: null }],
     maxMessages: 2,
   });
-  assert(pureKeyFetch.json?.results?.length === 1, '仅凭邮箱也能取件');
+  assert(pureKeyFetch.json?.results?.length === 1, '返回一条失败记录');
   assert(
-    pureKeyFetch.json.results[0].ok === true || !/凭据不完整/.test(pureKeyFetch.json.results[0].error || ''),
-    '服务端从数据库回查到了完整凭据',
-    pureKeyFetch.json.results[0].ok ? '取件成功' : `失败原因：${pureKeyFetch.json.results[0].error?.slice(0, 70)}`,
+    pureKeyFetch.json.results[0].ok === false && pureKeyFetch.json.results[0].accountId === null && pureKeyFetch.json.results[0].cardKey === null,
+    '没有读取库存凭据或泄露卡密',
   );
+
+  const deniedExport = await call('POST', '/public/pickup/export', {
+    records: [{ key: lookupKey, email: first.email }], kind: 'line',
+  }, { allowFailure: true });
+  assert(deniedExport.status === 403, '仅凭邮箱不能导出凭据');
+  const pickupExport = await call('POST', '/public/pickup/export', {
+    records: [{ key: lookupKey, fromCard: first.cardKey }], kind: 'line',
+  });
+  assert(pickupExport.text.trim() === emailLine, '有效卡密可导出对应邮箱凭据');
 
   // -------------------------------------------------------------------------
   console.log('\n[8.2] 前台取件：只传卡密（fromCard）');

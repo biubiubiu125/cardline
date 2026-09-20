@@ -1,14 +1,14 @@
-import { BadRequestException } from '@nestjs/common';
+import { HttpException } from '@nestjs/common';
 import type { ErrorCode } from './error-codes';
 
 /** 抛出带业务 code 的异常 */
 export function fail(status: number, code: ErrorCode, message: string, details?: unknown): never {
-  throw new BadRequestException({ statusCode: status, code, message, details });
+  throw new HttpException({ statusCode: status, code, message, details }, status);
 }
 
 /** 业务异常（可自定义 HTTP 状态码与 code） */
 export function bizError(code: ErrorCode, message: string, status = 400, details?: unknown): never {
-  const error = new BadRequestException({ statusCode: status, code, message, details });
+  const error = new HttpException({ statusCode: status, code, message, details }, status);
   throw error;
 }
 

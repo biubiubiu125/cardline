@@ -93,7 +93,7 @@ export default function LoginPage() {
           </Form.Item>
         </Form>
 
-        <p className="auth-card__hint">默认账号 admin / admin123</p>
+        <p className="auth-card__hint">请使用部署时设置的管理员账号和密码</p>
       </div>
     </div>
   );

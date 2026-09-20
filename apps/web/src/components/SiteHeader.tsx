@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { LockOutlined } from '@ant-design/icons';
 
 import { getPublicMeta } from '../api/client';
@@ -45,6 +45,15 @@ export default function SiteHeader() {
     <header className="site-header">
       <div className="shell site-header__inner">
         <BrandMark />
+
+        <nav className="site-header__nav" aria-label="主导航">
+          <NavLink to="/" end className={({ isActive }) => `site-header__link${isActive ? ' is-active' : ''}`}>
+            卡密兑换
+          </NavLink>
+          <NavLink to="/pickup" className={({ isActive }) => `site-header__link${isActive ? ' is-active' : ''}`}>
+            邮箱取件
+          </NavLink>
+        </nav>
 
         <div className="site-header__right">
           <StatusDot tone={tone} pulse={online === true} label={label} />

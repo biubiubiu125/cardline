@@ -4,7 +4,6 @@ import { App as AntApp, Button, Input, InputNumber, Select, Tag } from 'antd';
 import { downloadBlob, downloadText, errorMessage, getPublicMeta, redeemCards } from '../api/client';
 import type { DeliverFormat, PublicMeta, RedeemResponse, RedeemResult } from '../api/types';
 import SiteFooter from '../components/SiteFooter';
-import SiteHeader from '../components/SiteHeader';
 import StatusDot from '../components/StatusDot';
 import { formatNumber, timestampSuffix } from '../utils/format';
 import { buildZipBlob } from '../utils/zip';
@@ -233,8 +232,7 @@ export default function RedeemPage() {
   }, []);
 
   return (
-    <div className="page">
-      <SiteHeader />
+    <>
 
       <main className="page__body">
         <div className="shell redeem-body">
@@ -337,7 +335,7 @@ export default function RedeemPage() {
                   <InputNumber
                     style={{ width: '100%' }}
                     min={1}
-                    max={20}
+                    max={meta?.redeemLimitPerCard ?? 1}
                     precision={0}
                     value={limit}
                     onChange={(value) => setLimit(typeof value === 'number' ? value : 1)}
@@ -424,6 +422,6 @@ export default function RedeemPage() {
       </main>
 
       <SiteFooter siteName={meta?.siteName ?? 'Cardline'} />
-    </div>
+    </>
   );
 }

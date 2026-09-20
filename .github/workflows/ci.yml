@@ -33,6 +33,12 @@ jobs:
       - name: 格式转换回归测试
         run: npm run test:convert --workspace @cardline/server
 
+      - name: 安全与数据一致性回归测试
+        run: npm run test:security
+
+      - name: 独立数据库接口联调（模拟外部服务）
+        run: npm run test:smoke:local
+
       - name: 前端类型检查
         run: npm run typecheck --workspace @cardline/web
 

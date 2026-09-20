@@ -2,7 +2,8 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from './prisma/prisma.service';
 import { DEFAULT_SETTINGS } from './settings/settings.service';
-import { SCHEMA_STATEMENTS } from './prisma/schema-statements';
+import { initializeSchema } from './prisma/initialize-schema';
+import { initialAdminPassword } from './auth/security-config';
 
 @Injectable()
 export class SeedService implements OnModuleInit {
@@ -21,15 +22,7 @@ export class SeedService implements OnModuleInit {
    * Docker 镜像里也不必携带 Prisma CLI。
    */
   private async ensureSchema(): Promise<void> {
-    try {
-      for (const statement of SCHEMA_STATEMENTS) {
-        await this.prisma.$executeRawUnsafe(statement);
-      }
-    } catch (error) {
-      this.logger.error(
-        `初始化表结构失败：${error instanceof Error ? error.message : error}（如使用 MySQL/PostgreSQL 请先执行 prisma migrate）`,
-      );
-    }
+    await initializeSchema(this.prisma);
   }
 
   private async ensureAdmin(): Promise<void> {
@@ -37,7 +30,7 @@ export class SeedService implements OnModuleInit {
     if (count > 0) return;
 
     const username = process.env.ADMIN_USERNAME || 'admin';
-    const password = process.env.ADMIN_PASSWORD || 'admin123';
+    const password = initialAdminPassword();
     await this.prisma.adminUser.create({
       data: {
         username,
@@ -46,7 +39,7 @@ export class SeedService implements OnModuleInit {
         role: 'admin',
       },
     });
-    this.logger.log(`已创建默认后台账号：${username} / ${password}（请尽快修改密码）`);
+    this.logger.log(`已创建后台账号：${username}`);
   }
 
   private async ensureSettings(): Promise<void> {

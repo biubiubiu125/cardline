@@ -10,6 +10,7 @@ export const SCHEMA_STATEMENTS: string[] = [
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     "username" TEXT NOT NULL,
     "passwordHash" TEXT NOT NULL,
+    "sessionVersion" INTEGER NOT NULL DEFAULT 0,
     "displayName" TEXT NOT NULL DEFAULT '管理员',
     "role" TEXT NOT NULL DEFAULT 'admin',
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -50,6 +51,7 @@ export const SCHEMA_STATEMENTS: string[] = [
     "banKeywords" TEXT,
     "banCheckedAt" DATETIME,
     "redeemStatus" TEXT NOT NULL DEFAULT 'unredeemed',
+    "redeemedByCard" TEXT,
     "redeemedAt" DATETIME,
     "redeemCount" INTEGER NOT NULL DEFAULT 0,
     "copyCount" INTEGER NOT NULL DEFAULT 0,
@@ -128,5 +130,9 @@ export const SCHEMA_STATEMENTS: string[] = [
     "key" TEXT NOT NULL PRIMARY KEY,
     "value" TEXT NOT NULL,
     "updatedAt" DATETIME NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "SchemaMigration" (
+    "version" INTEGER NOT NULL PRIMARY KEY,
+    "appliedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
 ];

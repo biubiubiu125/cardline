@@ -10,6 +10,7 @@ import type {
   UpdateAccountRequest,
 } from '../api/types';
 import { BAN_STATUS_META, REDEEM_STATUS_META, formatCredits } from '../utils/format';
+import { useLatestRequest } from '../hooks/useLatestRequest';
 import CopyButton from './CopyButton';
 import MailBrowser from './MailBrowser';
 
@@ -58,78 +59,88 @@ function SecretRow({ label, value }: SecretRowProps) {
 export default function MailboxModal({ open, account, onClose, onChanged }: MailboxModalProps) {
   const { message } = AntApp.useApp();
   const accountId = account?.id ?? null;
+  const { begin, isCurrent, invalidate } = useLatestRequest();
 
   const [data, setData] = useState<MailboxResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    if (!accountId) return;
+    if (!accountId || !open) return;
+    const request = begin();
     setLoading(true);
     try {
       const response = await getAccountMailbox(accountId, { maxMessages: 10, refresh: 1 });
-      setData(response);
+      if (isCurrent(request)) setData(response);
     } catch (error) {
+      if (!isCurrent(request)) return;
       setData(null);
       void message.error(errorMessage(error));
     } finally {
-      setLoading(false);
+      if (isCurrent(request)) setLoading(false);
     }
-  }, [accountId, message]);
+  }, [accountId, begin, isCurrent, message, open]);
 
   useEffect(() => {
     if (!open) {
+      invalidate();
       setData(null);
       return;
     }
+    setSaving(false);
     void load();
-  }, [open, load]);
+    return invalidate;
+  }, [invalidate, open, load]);
 
   const patch = useCallback(
     async (payload: UpdateAccountRequest, successText: string) => {
       if (!accountId) return;
+      const request = begin();
       setSaving(true);
       try {
         await updateAccount(accountId, payload);
-        void message.success(successText);
         onChanged();
+        if (!isCurrent(request)) return;
+        void message.success(successText);
+        setSaving(false);
         await load();
       } catch (error) {
-        void message.error(errorMessage(error));
+        if (isCurrent(request)) void message.error(errorMessage(error));
       } finally {
-        setSaving(false);
+        if (isCurrent(request)) setSaving(false);
       }
     },
-    [accountId, load, message, onChanged],
+    [accountId, begin, isCurrent, load, message, onChanged],
   );
 
-  const mailbox: MailboxCredential | null = data?.mailbox ?? null;
-  const pickup = data?.pickup;
-  const info = data?.account;
+  const currentData = open && data?.account.id === accountId ? data : null;
+  const mailbox: MailboxCredential | null = currentData?.mailbox ?? null;
+  const pickup = currentData?.pickup;
+  const info = currentData?.account;
 
   /** 把弹窗数据结构换算成 MailBrowser 需要的取件结果 */
   const results = useMemo<PickupResult[]>(() => {
-    if (!data || !info) return [];
+    if (!currentData || !info) return [];
 
     return [
       {
         key: info.email || info.name,
         email: info.email || info.name,
-        ok: data.pickup.ok,
-        error: data.pickup.error,
-        banned: data.pickup.banned,
-        banReason: data.pickup.banReason,
-        banKeywords: data.pickup.banKeywords ?? [],
-        credits: data.pickup.credits,
-        creditsBalance: data.pickup.creditsBalance,
-        latestCode: data.pickup.latestCode,
+        ok: currentData.pickup.ok,
+        error: currentData.pickup.error,
+        banned: currentData.pickup.banned,
+        banReason: currentData.pickup.banReason,
+        banKeywords: currentData.pickup.banKeywords ?? [],
+        credits: currentData.pickup.credits,
+        creditsBalance: currentData.pickup.creditsBalance,
+        latestCode: currentData.pickup.latestCode,
         accountId: info.id,
         cardKey: info.cardKey,
-        fetchedAt: data.pickup.fetchedAt ?? new Date().toISOString(),
-        messages: data.messages ?? [],
+        fetchedAt: currentData.pickup.fetchedAt ?? new Date().toISOString(),
+        messages: currentData.messages ?? [],
       },
     ];
-  }, [data, info]);
+  }, [currentData, info]);
 
   const pickupSummary = useMemo(() => {
     if (!pickup) return '';

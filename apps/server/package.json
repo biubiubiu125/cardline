@@ -12,7 +12,9 @@
     "db:push": "prisma db push && prisma generate",
     "db:studio": "prisma studio",
     "make-samples": "node scripts/make-samples.js",
-    "test:convert": "node --test test/*.test.js",
+    "test:convert": "node --test test/convert.test.js",
+    "test:security": "node --test test/security.test.js",
+    "test:smoke:local": "node scripts/smoke-local.js",
     "test:smoke": "node scripts/smoke-test.js",
     "page-check": "node scripts/page-check.js"
   },

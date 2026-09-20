@@ -4,6 +4,7 @@ import { SaveOutlined } from '@ant-design/icons';
 
 import { changePassword, errorMessage, getSettings, updateSettings } from '../../api/client';
 import type { DeliverFormat, Settings } from '../../api/types';
+import { useAuth } from '../../hooks/useAuth';
 
 const { TextArea } = Input;
 
@@ -24,6 +25,7 @@ interface PasswordFormValues {
  */
 export default function SettingsPage() {
   const { message } = AntApp.useApp();
+  const { logout } = useAuth();
   const [form] = Form.useForm<Settings>();
   const [passwordForm] = Form.useForm<PasswordFormValues>();
 
@@ -89,8 +91,9 @@ export default function SettingsPage() {
         oldPassword: values.oldPassword,
         newPassword: values.newPassword,
       });
-      void message.success('密码已更新');
+      void message.success('密码已更新，请重新登录');
       passwordForm.resetFields();
+      logout();
     } catch (error) {
       void message.error(errorMessage(error));
     } finally {

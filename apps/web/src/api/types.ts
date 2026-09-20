@@ -63,6 +63,7 @@ export type RedeemResultCode =
   | 'CARD_INVALID'
   | 'NO_STOCK'
   | 'CARD_DISABLED'
+  | 'CARD_ALLOCATED'
   | 'CREDITS_PENDING';
 
 /* ------------------------------------------------------------------ *
@@ -96,6 +97,7 @@ export interface PublicPickupMeta {
 }
 
 export interface PublicMeta {
+  redeemLimitPerCard: number;
   siteName: string;
   siteSubtitle: string;
   formats: FormatOption[];
@@ -182,6 +184,8 @@ export interface PickupRecord {
   accountId: number | null;
   label: string;
   error: string | null;
+  /** 仅包含用户自行输入或上传的凭据，不含卡密解析出的库内秘密。 */
+  line?: string;
 }
 
 export interface PickupResolveSummary {
@@ -204,7 +208,7 @@ export interface PickupResolveResponse {
 export interface PickupFetchRecordInput {
   key: string;
   email: string;
-  /** 四段式凭据行；不传时服务端按 key / fromCard 回查数据库 */
+  /** 用户自带四段式凭据行；不传时必须提供有效 fromCard。 */
   line?: string;
   fromCard?: string | null;
 }
@@ -266,7 +270,7 @@ export interface PickupFetchResponse {
  * ------------------------------------------------------------------ */
 
 export interface PickupExportRequest {
-  keys: string[];
+  records: PickupFetchRecordInput[];
   kind: PickupExportKind;
 }
 

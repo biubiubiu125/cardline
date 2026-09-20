@@ -67,6 +67,7 @@ import type {
 } from '../../api/types';
 import CopyButton, { copyToClipboard } from '../../components/CopyButton';
 import MailboxModal from '../../components/MailboxModal';
+import { useLatestRequest } from '../../hooks/useLatestRequest';
 import { copyCardKeys, reportCardCopy, type CardCopyScope } from '../../utils/cardCopy';
 import {
   BAN_STATUS_META,
@@ -645,7 +646,7 @@ function RefreshStatusModal({
               checked={refreshRedeem}
               onChange={(event) => setRefreshRedeem(event.target.checked)}
             >
-              刷新兑换状态
+              检查账号凭据
             </Checkbox>
             <Checkbox
               checked={refreshCredits}
@@ -738,6 +739,7 @@ function RefreshStatusModal({
  */
 export default function AccountsPage() {
   const { message } = AntApp.useApp();
+  const { begin, isCurrent, invalidate } = useLatestRequest();
 
   const [filters, setFilters] = useState<AccountFilters>(INITIAL_FILTERS);
   const [page, setPage] = useState(1);
@@ -791,24 +793,28 @@ export default function AccountsPage() {
   );
 
   const load = useCallback(async () => {
+    const request = begin();
     setLoading(true);
     try {
       const response = await listAccounts(query);
+      if (!isCurrent(request)) return;
       setRows(response.items ?? []);
       setTotal(response.total ?? 0);
       setSummary(response.summary ?? EMPTY_SUMMARY);
     } catch (error) {
+      if (!isCurrent(request)) return;
       void message.error(errorMessage(error));
       setRows([]);
       setTotal(0);
     } finally {
-      setLoading(false);
+      if (isCurrent(request)) setLoading(false);
     }
-  }, [message, query]);
+  }, [begin, isCurrent, message, query]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return invalidate;
+  }, [invalidate, load]);
 
   const creditSelectOptions = useMemo(() => {
     const options =

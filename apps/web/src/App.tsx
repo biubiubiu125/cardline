@@ -3,6 +3,7 @@ import { Button, Result } from 'antd';
 
 import SiteFooter from './components/SiteFooter';
 import SiteHeader from './components/SiteHeader';
+import PublicLayout from './components/PublicLayout';
 import PickupPage from './pages/PickupPage';
 import RedeemPage from './pages/RedeemPage';
 import AccountsPage from './pages/admin/AccountsPage';
@@ -42,8 +43,10 @@ function NotFoundPage() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<RedeemPage />} />
-      <Route path="/pickup" element={<PickupPage />} />
+      <Route element={<PublicLayout />}>
+        <Route path="/" element={<RedeemPage />} />
+        <Route path="/pickup" element={<PickupPage />} />
+      </Route>
 
       <Route path="/admin/login" element={<LoginPage />} />
       <Route path="/admin" element={<AdminLayout />}>

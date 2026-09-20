@@ -591,7 +591,7 @@ export class AccountsService {
 
   async update(id: number, patch: Record<string, unknown>) {
     await this.getById(id, false);
-    const data: Prisma.AccountUpdateInput = {};
+    const data: Prisma.AccountUpdateManyMutationInput = {};
 
     if (patch.remark !== undefined) data.remark = patch.remark === null ? null : String(patch.remark);
     // 兜底通道：额度正常由邮箱取件自动定档，这里只作为「人工纠错」的最后手段保留。
@@ -619,12 +619,12 @@ export class AccountsService {
       data.redeemedAt = status === 'redeemed' ? new Date() : null;
     }
 
-    const updated = await this.prisma.account.update({
-      where: { id },
+    const changed = await this.prisma.account.updateMany({
+      where: { id, ...(data.redeemStatus === 'unredeemed' ? { redeemedByCard: null } : {}) },
       data,
-      include: { mailbox: { select: { email: true, clientId: true, refreshToken: true } } },
     });
-    return this.toRow(updated);
+    if (!changed.count) bizError('CONFLICT', '已交付账号不能重置为未兑换，避免重复出售');
+    return this.toRow(await this.getById(id, true));
   }
 
   async batchDelete(ids: number[]) {
@@ -648,13 +648,20 @@ export class AccountsService {
     const ids = (payload?.ids || []).map((id) => Number(id)).filter((id) => Number.isFinite(id));
     const accounts = await this.prisma.account.findMany({
       where: ids.length ? { id: { in: ids } } : {},
-      select: { id: true, cardKey: true },
+      select: { id: true, cardKey: true, redeemStatus: true, redeemedByCard: true },
     });
+    if (payload?.regenerate && accounts.some((account) => account.redeemStatus === 'redeemed' || account.redeemedByCard)) {
+      bizError('CONFLICT', '已兑换账号不能重新生成卡密，原卡密需要保留用于重复下载');
+    }
     let updated = 0;
     for (const account of accounts) {
       if (account.cardKey && !payload?.regenerate) continue;
       const cardKey = await this.uniqueCardKey(prefix, 3, 5);
-      await this.prisma.account.update({ where: { id: account.id }, data: { cardKey } });
+      const changed = await this.prisma.account.updateMany({
+        where: { id: account.id, cardKey: account.cardKey, redeemStatus: 'unredeemed', redeemedByCard: null },
+        data: { cardKey },
+      });
+      if (!changed.count) bizError('CONFLICT', '账号状态已变化，请刷新后重试');
       updated++;
     }
     return { updated };
@@ -911,68 +918,51 @@ export class AccountsService {
     };
   }
 
-  /** 刷新兑换状态：token 是否被使用/失效 */
+  /** 凭据健康检查不推断交易行为，兑换状态只由交付或管理员操作改变。 */
   private async refreshRedeem(
     account: Account & { mailbox?: any },
   ): Promise<{ redeemStatus: string; redeemedAt: string | null; error: string | null }> {
-    const refreshToken = account.refreshToken || account.mailbox?.refreshToken || undefined;
-
-    if (!refreshToken) {
-      // 没有 refresh_token 时只能判断 access_token 是否过期
-      const expired = account.expiresAt ? account.expiresAt.getTime() < Date.now() : false;
-      if (expired) {
-        await this.prisma.account.update({
-          where: { id: account.id },
-          data: { banStatus: 'invalid', banReason: 'access_token 已过期且无 refresh_token' },
-        });
+    const result = (error: string | null = null) => ({
+      redeemStatus: account.redeemStatus,
+      redeemedAt: account.redeemedAt?.toISOString() || null,
+      error,
+    });
+    let expiresAt = account.expiresAt?.getTime();
+    if (!Number.isFinite(expiresAt)) {
+      try {
+        const claims = JSON.parse(Buffer.from(account.accessToken.split('.')[1], 'base64url').toString());
+        if (Number.isFinite(claims.exp)) expiresAt = claims.exp * 1000;
+      } catch {
+        // 未知有效期不能作为已兑换或凭据失效的证据。
       }
-      return {
-        redeemStatus: account.redeemStatus,
-        redeemedAt: account.redeemedAt ? account.redeemedAt.toISOString() : null,
-        error: '缺少 refresh_token，无法判定兑换状态',
-      };
     }
+    if (!Number.isFinite(expiresAt)) return result('无法确定 access_token 有效期，未自动刷新');
+    if (expiresAt > Date.now()) return result();
 
-    const refreshed = await this.mailbox.refreshOpenAiToken(refreshToken);
+    // MailCredential.refreshToken 属于微软 OAuth，绝不能发送给 OpenAI。
+    if (!account.refreshToken) return result('缺少 OpenAI refresh_token，无法刷新过期凭据');
+    const refreshed = await this.mailbox.refreshOpenAiToken(account.refreshToken);
     if (!refreshed.ok) {
       if (refreshed.invalidCredential) {
-        await this.prisma.account.update({
-          where: { id: account.id },
+        await this.prisma.account.updateMany({
+          where: { id: account.id, refreshToken: account.refreshToken, banStatus: { not: 'banned' } },
           data: { banStatus: 'invalid', banReason: refreshed.error, banCheckedAt: new Date() },
         });
       }
-      return {
-        redeemStatus: account.redeemStatus,
-        redeemedAt: account.redeemedAt ? account.redeemedAt.toISOString() : null,
-        error: refreshed.error || '刷新失败',
-      };
+      return result(refreshed.error || '刷新失败');
     }
 
-    // 账号已被他人使用过：refresh_token 轮换（返回了新的 refresh_token）
-    const rotated = Boolean(refreshed.refreshToken && refreshed.refreshToken !== refreshToken);
-    const markRedeemed = rotated || account.redeemStatus === 'redeemed';
-    const redeemedAt =
-      markRedeemed && !account.redeemedAt ? new Date() : account.redeemedAt || null;
-
-    await this.prisma.account.update({
-      where: { id: account.id },
+    // 条件写回避免覆盖并发更新；不写 banStatus / redeemStatus 等其他流程管理的字段。
+    await this.prisma.account.updateMany({
+      where: { id: account.id, refreshToken: account.refreshToken },
       data: {
         accessToken: refreshed.accessToken!,
         refreshToken: refreshed.refreshToken || account.refreshToken,
         idToken: refreshed.idToken || account.idToken,
         expiresAt: refreshed.expiresAt || account.expiresAt,
-        redeemStatus: markRedeemed ? 'redeemed' : account.redeemStatus,
-        redeemedAt,
-        banStatus: account.banStatus === 'invalid' ? 'normal' : account.banStatus,
-        banCheckedAt: new Date(),
       },
     });
-
-    return {
-      redeemStatus: markRedeemed ? 'redeemed' : account.redeemStatus,
-      redeemedAt: redeemedAt ? redeemedAt.toISOString() : null,
-      error: null,
-    };
+    return result();
   }
 
   /**
@@ -980,7 +970,7 @@ export class AccountsService {
    *
    * targets：
    *  - `ban`     取件扫描封禁关键词
-   *  - `redeem`  用 refresh_token 判定账号是否已被使用
+   *  - `redeem`  刷新已过期的 OpenAI 凭据，保留实际交付状态
    *  - `credits` 取件命中额度关键字 → 自动定档（额度只来自邮件，不接受人工填写）
    *
    * `credits` 与 `ban` 共用同一次取件结果（不会重复请求邮箱）。
@@ -1032,6 +1022,8 @@ export class AccountsService {
         error: null,
       };
       const errors: string[] = [];
+      let banFailed = false;
+      let redeemFailed = false;
 
       if (needPickup) {
         try {
@@ -1042,10 +1034,8 @@ export class AccountsService {
             entry.banKeywords = pickup.banKeywords;
             if (pickup.error) {
               errors.push(pickup.error);
-              banCounter.failed++;
-            } else if (pickup.banStatus === 'banned') banCounter.banned++;
-            else if (pickup.banStatus === 'invalid') banCounter.invalid++;
-            else banCounter.normal++;
+              banFailed = true;
+            }
           } else if (pickup.error) {
             errors.push(pickup.error);
           }
@@ -1070,7 +1060,7 @@ export class AccountsService {
         } catch (error) {
           const reason = error instanceof Error ? error.message : '取件失败';
           errors.push(reason);
-          if (effectiveTargets.includes('ban')) banCounter.failed++;
+          banFailed = true;
           if (effectiveTargets.includes('credits')) creditsCounter.failed++;
         }
       }
@@ -1082,15 +1072,36 @@ export class AccountsService {
           entry.redeemedAt = redeem.redeemedAt;
           if (redeem.error) {
             errors.push(redeem.error);
-            redeemCounter.failed++;
-          } else if (redeem.redeemStatus === 'redeemed') redeemCounter.redeemed++;
-          else redeemCounter.unredeemed++;
+            redeemFailed = true;
+          }
         } catch (error) {
           errors.push(error instanceof Error ? error.message : '刷新兑换状态失败');
-          redeemCounter.failed++;
+          redeemFailed = true;
         }
       }
 
+      const fresh = await this.prisma.account.findUnique({ where: { id: account.id } });
+      if (fresh) {
+        Object.assign(entry, {
+          banStatus: fresh.banStatus,
+          banReason: fresh.banReason,
+          redeemStatus: fresh.redeemStatus,
+          redeemedAt: fresh.redeemedAt?.toISOString() || null,
+          credits: fresh.credits,
+          creditStatus: isPendingTier(fresh.credits) ? 'pending' : 'ready',
+        });
+      }
+      if (effectiveTargets.includes('ban')) {
+        if (banFailed || !fresh) banCounter.failed++;
+        else if (fresh.banStatus === 'banned') banCounter.banned++;
+        else if (fresh.banStatus === 'invalid') banCounter.invalid++;
+        else banCounter.normal++;
+      }
+      if (effectiveTargets.includes('redeem')) {
+        if (redeemFailed || !fresh) redeemCounter.failed++;
+        else if (fresh.redeemStatus === 'redeemed') redeemCounter.redeemed++;
+        else redeemCounter.unredeemed++;
+      }
       entry.error = errors.length ? errors.join('；') : null;
       items.push(entry);
     });

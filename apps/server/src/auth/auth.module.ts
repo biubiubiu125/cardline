@@ -3,14 +3,17 @@ import { JwtModule } from '@nestjs/jwt';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { jwtSecret } from './security-config';
 
 @Global()
 @Module({
   imports: [
-    JwtModule.register({
+    JwtModule.registerAsync({
       global: true,
-      secret: process.env.JWT_SECRET || 'cardline-dev-secret-change-me',
-      signOptions: { expiresIn: process.env.JWT_EXPIRES_IN || '7d' },
+      useFactory: () => ({
+        secret: jwtSecret(),
+        signOptions: { expiresIn: process.env.JWT_EXPIRES_IN || '7d' },
+      }),
     }),
   ],
   controllers: [AuthController],

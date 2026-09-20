@@ -6,6 +6,7 @@ import { SettingsService } from '../settings/settings.service';
 import { FORMAT_META } from '../common/error-codes';
 import { isPendingTier, tierFromMailCredits } from '../common/credits';
 import {
+  bizError,
   looksEmail,
   normalizeCardKey,
   safeFilename,
@@ -41,6 +42,23 @@ export interface ResolvedRecord {
   accountId: number | null;
   label: string;
   error: string | null;
+  /** 仅回传用户自行提供的凭据，卡密对应的库内凭据不在解析阶段返回。 */
+  line?: string;
+}
+
+export interface PickupRecordInput {
+  key?: string;
+  email?: string;
+  line?: string;
+  fromCard?: string | null;
+}
+
+interface PreparedPickupRecord {
+  key: string;
+  email: string;
+  accountId: number | null;
+  cardKey: string | null;
+  credential: MailboxCredential | null;
 }
 
 type AccountWithMailbox = Account & { mailbox: any };
@@ -173,7 +191,8 @@ export class RedeemService {
       };
     }
 
-    const limit = Math.min(20, Math.max(1, Number(payload?.limit) || settings.redeemLimitPerCard || 1));
+    const configuredLimit = Math.min(20, Math.max(1, Math.trunc(Number(settings.redeemLimitPerCard) || 1)));
+    const limit = Math.min(configuredLimit, Math.max(1, Math.trunc(Number(payload?.limit) || configuredLimit)));
 
     const results: Array<Record<string, unknown>> = [];
     /** 各卡成功交付的账号，按提交顺序累积，用于生成「合并下载」的单份文档 */
@@ -228,11 +247,6 @@ export class RedeemService {
     ip?: string,
     userAgent?: string,
   ): Promise<{ record: Record<string, unknown>; normalized: NormalizedAccount[] }> {
-    const account = (await this.prisma.account.findUnique({
-      where: { cardKey },
-      include: { mailbox: true },
-    })) as AccountWithMailbox | null;
-
     const fail = (
       code: string,
       message: string,
@@ -253,100 +267,94 @@ export class RedeemService {
       },
     });
 
-    if (!account) {
-      await this.log(cardKey, null, 0, format, false, 'CARD_INVALID', ip, userAgent);
-      return fail('CARD_INVALID', '卡密不存在');
-    }
-    if (account.cardDisabled) {
-      await this.log(cardKey, account.id, account.credits, format, false, 'CARD_DISABLED', ip, userAgent);
-      return fail('CARD_DISABLED', '该卡密已被停用');
-    }
-    // 待定档：账号额度还没从邮箱取件里定出来，不进兑换池（避免按错误档位交付）
-    if (isPendingTier(account.credits)) {
-      await this.log(cardKey, account.id, account.credits, format, false, 'CREDITS_PENDING', ip, userAgent);
-      return fail('CREDITS_PENDING', '该卡密账号额度待定（邮箱取件尚未命中额度），请稍后重试');
-    }
-    if (account.banStatus === 'banned') {
-      await this.log(cardKey, account.id, account.credits, format, false, 'NO_STOCK', ip, userAgent);
-      return fail('NO_STOCK', '该卡密对应账号已封禁，请联系管理员');
-    }
-
-    // 首次兑换：尝试抢占账号（redeemStatus: unredeemed → redeemed 的原子更新即锁）
-    let isFirstRedeem = false;
-    let finalAccount = account;
-
-    const claimed = await this.prisma.account.updateMany({
-      where: { id: account.id, redeemStatus: 'unredeemed' },
-      data: {
-        redeemStatus: 'redeemed',
-        redeemedAt: new Date(),
-        redeemCount: { increment: 1 },
-      },
-    });
-
-    if (claimed.count === 1) {
-      isFirstRedeem = true;
-    } else {
-      // 已兑换过：本卡不再消耗新账号，只允许切换格式重复导出
-      await this.prisma.account.update({
-        where: { id: account.id },
-        data: { redeemCount: { increment: 1 } },
-      });
-    }
-
-    // 同一额度下的可用账号数量（首次兑换时用于 limit 扩展）
-    const verified = (await this.prisma.account.findUnique({
-      where: { id: account.id },
-      include: { mailbox: true },
-    })) as AccountWithMailbox;
-
-    const accounts: AccountWithMailbox[] = [verified];
-    if (isFirstRedeem && limit > 1) {
-      const extra = (await this.prisma.account.findMany({
+    let accountId: number | null = null;
+    const result = await this.prisma.$transaction(async (tx) => {
+      const redeemedAt = new Date();
+      // 第一个语句先竞争写锁，后续查库存与占用附加账号始终处于同一事务。
+      const claimed = await tx.account.updateMany({
         where: {
-          id: { not: account.id },
-          credits: account.credits,
+          cardKey,
           redeemStatus: 'unredeemed',
-          banStatus: { notIn: ['banned', 'invalid'] },
+          redeemedByCard: null,
           cardDisabled: false,
+          credits: { gt: 0 },
+          banStatus: { notIn: ['banned', 'invalid'] },
         },
+        data: { redeemStatus: 'redeemed', redeemedByCard: cardKey, redeemedAt },
+      });
+      const account = await tx.account.findUnique({ where: { cardKey }, include: { mailbox: true } });
+      if (!account) return fail('CARD_INVALID', '卡密不存在');
+      accountId = account.id;
+      if (account.cardDisabled) return fail('CARD_DISABLED', '该卡密已被停用');
+      if (account.redeemedByCard && account.redeemedByCard !== cardKey) {
+        return fail('CARD_ALLOCATED', '该账号已归属其他卡密的交付，请联系管理员');
+      }
+      if (isPendingTier(account.credits)) {
+        return fail('CREDITS_PENDING', '该卡密账号额度待定，请稍后重试');
+      }
+      if (['banned', 'invalid'].includes(account.banStatus)) {
+        return fail('NO_STOCK', '该卡密对应账号已封禁或凭据失效，请联系管理员');
+      }
+
+      const isFirstRedeem = claimed.count === 1;
+      if (!account.redeemedByCard) {
+        // 兼容管理员标记为已兑换、但尚未建立交付归属的单账号。
+        await tx.account.update({ where: { id: account.id }, data: { redeemedByCard: cardKey } });
+      }
+      if (isFirstRedeem && limit > 1) {
+        const extra = await tx.account.findMany({
+          where: {
+            credits: account.credits,
+            redeemStatus: 'unredeemed',
+            redeemedByCard: null,
+            banStatus: { notIn: ['banned', 'invalid'] },
+            cardDisabled: false,
+          },
+          select: { id: true },
+          orderBy: { id: 'asc' },
+          take: limit - 1,
+        });
+        if (extra.length) {
+          await tx.account.updateMany({
+            where: { id: { in: extra.map((item) => item.id) } },
+            data: { redeemStatus: 'redeemed', redeemedByCard: cardKey, redeemedAt, redeemCount: { increment: 1 } },
+          });
+        }
+      }
+
+      const accounts = await tx.account.findMany({
+        where: { redeemedByCard: cardKey },
         include: { mailbox: true },
         orderBy: { id: 'asc' },
-        take: limit - 1,
-      })) as AccountWithMailbox[];
-      accounts.push(...extra);
-    }
-
-    const normalized = accounts.map((item) => this.toNormalized(item));
-    const content = this.convert.buildDeliverContent(format, normalized);
-    // 文件名带上格式：<卡密>.sub2api.json / <卡密>.cpa.json / <卡密>.txt。
-    // CPA 批量下载会把这些文件打成一个 zip，名字里不带格式就分不出是哪一种。
-    const filename = deliverFilename(cardKey, format);
-
-    await this.log(cardKey, account.id, account.credits, format, true, 'OK', ip, userAgent);
-
-    return {
-      normalized,
-      record: {
-        card: cardKey,
-        ok: true,
-        code: 'OK',
-        message: isFirstRedeem ? '兑换成功' : '已兑换过，本次为同账号重新导出',
-        credits: account.credits,
-        accountCount: accounts.length,
-        redeemedAt: (verified.redeemedAt || new Date()).toISOString(),
-        firstRedeem: isFirstRedeem,
-        filename,
-        content,
-        accounts: accounts.map((item) => ({
-          id: item.id,
-          name: item.name,
-          credits: item.credits,
-          planType: item.planType,
-          email: item.email,
-        })),
-      },
-    };
+      });
+      if (accounts.some((item) => item.cardDisabled || ['banned', 'invalid'].includes(item.banStatus))) {
+        return fail('NO_STOCK', '交付账号已停用、封禁或凭据失效，请联系管理员');
+      }
+      const normalized = accounts.map((item) => this.toNormalized(item));
+      // 在事务内生成交付文件，转换异常会回滚本次库存占用。
+      const content = this.convert.buildDeliverContent(format, normalized);
+      await tx.account.update({ where: { id: account.id }, data: { redeemCount: { increment: 1 } } });
+      return {
+        normalized,
+        record: {
+          card: cardKey,
+          ok: true,
+          code: 'OK',
+          message: isFirstRedeem ? '兑换成功' : '已兑换过，本次为同批账号重新导出',
+          credits: account.credits,
+          accountCount: accounts.length,
+          redeemedAt: (account.redeemedAt || redeemedAt).toISOString(),
+          firstRedeem: isFirstRedeem,
+          filename: deliverFilename(cardKey, format),
+          content,
+          accounts: accounts.map((item) => ({
+            id: item.id, name: item.name, credits: item.credits, planType: item.planType, email: item.email,
+          })),
+        },
+      };
+    }, { maxWait: 10000, timeout: 15000 });
+    await this.log(cardKey, accountId, Number(result.record.credits) || 0, format, Boolean(result.record.ok), String(result.record.code), ip, userAgent);
+    return result;
   }
 
   private toNormalized(account: AccountWithMailbox): NormalizedAccount {
@@ -484,25 +492,24 @@ export class RedeemService {
         // 卡密（形如 CARD-XXXXX-XXXXX-XXXXX）
         if (/^[A-Z0-9]{3,12}(-[A-Z0-9]{3,12}){2,4}$/.test(line)) {
           const cardKey = normalizeCardKey(line);
-          const account = (await this.prisma.account.findUnique({
-            where: { cardKey },
-            include: { mailbox: true },
-          })) as AccountWithMailbox | null;
-          if (account) {
-            const credential = this.credentialOf(account);
-            addRecord({
-              key: (credential?.email || account.email || account.name).toLowerCase(),
-              email: credential?.email || account.email || account.name,
-              source: 'card',
-              complete: this.mailbox.isComplete(credential),
-              fromCard: cardKey,
-              credits: isPendingTier(account.credits) ? null : account.credits,
-              accountId: account.id,
-              label: '卡密',
-              error: this.mailbox.isComplete(credential)
-                ? null
-                : '卡密对应的账号缺少完整取件凭据（client_id / refresh_token）',
-            });
+          const accounts = await this.pickupAccountsForCard(cardKey);
+          if (accounts.length) {
+            for (const account of accounts) {
+              const credential = this.credentialOf(account);
+              addRecord({
+                key: (credential?.email || account.email || account.name).toLowerCase(),
+                email: credential?.email || account.email || account.name,
+                source: 'card',
+                complete: this.mailbox.isComplete(credential),
+                fromCard: cardKey,
+                credits: isPendingTier(account.credits) ? null : account.credits,
+                accountId: account.id,
+                label: '卡密',
+                error: this.mailbox.isComplete(credential)
+                  ? null
+                  : '卡密对应的账号缺少完整取件凭据（client_id / refresh_token）',
+              });
+            }
             continue;
           }
           unknown.push(line);
@@ -511,23 +518,16 @@ export class RedeemService {
 
         if (looksEmail(line)) {
           const email = line.toLowerCase();
-          const account = (await this.prisma.account.findFirst({
-            where: { email },
-            include: { mailbox: true },
-          })) as AccountWithMailbox | null;
-          const credential = account ? this.credentialOf(account) : this.mailbox.parseCredential(email);
           addRecord({
             key: email,
             email,
-            source: account ? 'card' : 'email',
-            complete: this.mailbox.isComplete(credential),
-            fromCard: account?.cardKey ?? null,
-            credits: account && !isPendingTier(account.credits) ? account.credits : null,
-            accountId: account?.id ?? null,
-            label: account ? '邮箱（已匹配账号）' : '仅邮箱',
-            error: this.mailbox.isComplete(credential)
-              ? null
-              : '缺少取件凭据（密码 / client_id / refresh_token）',
+            source: 'email',
+            complete: false,
+            fromCard: null,
+            credits: null,
+            accountId: null,
+            label: '仅邮箱',
+            error: '请提供卡密或完整邮箱凭据，仅邮箱地址不能取件',
           });
           continue;
         }
@@ -565,6 +565,7 @@ export class RedeemService {
       error: this.mailbox.isComplete(credential)
         ? null
         : '凭据不完整，需要 邮箱----密码----clientid----refresh_token',
+      line: this.mailbox.parseCredential(credential)?.line,
     };
   }
 
@@ -621,75 +622,65 @@ export class RedeemService {
     return null;
   }
 
+  private async pickupAccountsForCard(cardKey: string): Promise<AccountWithMailbox[]> {
+    const owner = await this.prisma.account.findUnique({ where: { cardKey }, include: { mailbox: true } });
+    if (!owner || owner.cardDisabled || (owner.redeemedByCard && owner.redeemedByCard !== cardKey)) return [];
+    if (!owner.redeemedByCard) return [owner];
+    return this.prisma.account.findMany({
+      where: { redeemedByCard: cardKey, cardDisabled: false },
+      include: { mailbox: true },
+      orderBy: { id: 'asc' },
+    });
+  }
+
+  /** 用户自带凭据永不关联库存；只有有效卡密可以读取和回写库内账号。 */
+  private async preparePickupRecord(item: PickupRecordInput): Promise<PreparedPickupRecord> {
+    const key = String(item?.key || item?.email || '').trim().toLowerCase();
+    let account: AccountWithMailbox | null = null;
+    let credential: MailboxCredential | null = null;
+    let cardKey: string | null = null;
+    if (typeof item?.line === 'string' && item.line.trim()) {
+      credential = this.mailbox.parseCredential(item.line);
+    } else if (typeof item?.fromCard === 'string' && item.fromCard.trim()) {
+      const requestedCard = normalizeCardKey(item.fromCard);
+      const accounts = await this.pickupAccountsForCard(requestedCard);
+      const candidate = !key || normalizeCardKey(key) === requestedCard
+        ? accounts.find((row) => row.cardKey === requestedCard)
+        : accounts.find((row) => (row.mailbox?.email || row.email || row.name).toLowerCase() === key);
+      if (candidate) {
+        account = candidate;
+        cardKey = requestedCard;
+        credential = this.credentialOf(candidate);
+      }
+    }
+    return {
+      key: credential?.email || key,
+      email: credential?.email || key,
+      accountId: account?.id ?? null,
+      cardKey,
+      credential,
+    };
+  }
+
   // -------------------------------------------------------------------------
   // 取件：执行
   // -------------------------------------------------------------------------
 
   async fetchPickup(payload: {
-    records?: Array<{ key?: string; email?: string; line?: string; fromCard?: string | null }>;
+    records?: PickupRecordInput[];
     maxMessages?: number;
     query?: string;
   }) {
     const settings = await this.settings.getAll();
-    const incoming = (payload?.records || []).slice(0, MAX_PICKUP_RECORDS);
+    if (!Array.isArray(payload?.records)) bizError('BAD_INPUT', 'records 必须是取件记录数组');
+    const incoming = payload.records.slice(0, MAX_PICKUP_RECORDS);
     const maxMessages = Math.min(
       50,
       Math.max(1, Number(payload?.maxMessages) || settings.pickupMaxMessages || 10),
     );
 
-    const prepared: Array<{
-      key: string;
-      email: string;
-      accountId: number | null;
-      cardKey: string | null;
-      credential: MailboxCredential | null;
-    }> = [];
-
-    for (const item of incoming) {
-      const key = String(item?.key || item?.email || '').toLowerCase();
-      const account = item?.fromCard
-        ? ((await this.prisma.account.findUnique({
-            where: { cardKey: normalizeCardKey(item.fromCard) },
-            include: { mailbox: true },
-          })) as AccountWithMailbox | null)
-        : key
-          ? ((await this.prisma.account.findFirst({
-              where: { OR: [{ email: key }, { name: key }] },
-              include: { mailbox: true },
-            })) as AccountWithMailbox | null)
-          : null;
-
-      // 凭据优先级：显式传入的四段式凭据行 → 数据库里该账号的邮箱凭据 → 裸邮箱（仅供展示，取件会报缺凭据）
-      // 注意：不能写成 `parseCredential(line, key) || credentialOf(account)`，
-      // 因为 key 本身是邮箱时 parseCredential 会返回一个「只有邮箱、没有 clientId/refreshToken」的对象，
-      // 它是 truthy，会导致永远不回退到数据库凭据。
-      const providedLine = typeof item?.line === 'string' && item.line.includes('----') ? item.line : undefined;
-      const lineCredential = providedLine ? this.mailbox.parseCredential(providedLine) : null;
-      const accountCredential = account ? this.credentialOf(account) : null;
-      const keyCredential = key ? this.mailbox.parseCredential(key) : null;
-      const credential =
-        (lineCredential && this.mailbox.isComplete(lineCredential) ? lineCredential : null) ||
-        (accountCredential && this.mailbox.isComplete(accountCredential) ? accountCredential : null) ||
-        lineCredential ||
-        accountCredential ||
-        keyCredential;
-
-      this.logger.debug(
-        `取件准备 key=${key} 命中账号=${account?.id ?? 'none'} email=${account?.email ?? 'null'} mailbox=${
-          account?.mailbox ? `${account.mailbox.email}|cid=${Boolean(account.mailbox.clientId)}|rt=${Boolean(
-            account.mailbox.refreshToken,
-          )}` : 'null'
-        } providedLine=${providedLine ? 'yes' : 'no'} 凭据完整=${this.mailbox.isComplete(credential)}`,
-      );
-
-      prepared.push({
-        key: key || credential?.email || '',
-        email: credential?.email || key,
-        accountId: account?.id ?? null,
-        cardKey: account?.cardKey ?? (item?.fromCard ? normalizeCardKey(item.fromCard) : null),
-        credential,
-      });
-    }
+    const prepared: PreparedPickupRecord[] = [];
+    for (const item of incoming) prepared.push(await this.preparePickupRecord(item));
 
     const results = await this.mailbox.pickupMany(
       prepared.map((item) => ({ key: item.key, credential: item.credential })),
@@ -703,12 +694,13 @@ export class RedeemService {
         key: meta?.key || result.key,
         accountId: meta?.accountId ?? null,
         cardKey: meta?.cardKey ?? null,
+        error: meta?.credential ? result.error : '请提供有效卡密或完整邮箱凭据',
       };
     });
 
     // 命中的封禁/额度回写数据库
     for (const result of enriched) {
-      if (!result.accountId || !result.ok) continue;
+      if (!result.accountId || !result.ok || payload.query?.trim()) continue;
       try {
         await this.prisma.pickupLog.create({
           data: {
@@ -723,16 +715,22 @@ export class RedeemService {
         });
         // 取件即定档：命中额度关键字 → 写回账号档位（0 = 仍未命中，保持原值）
         const tier = tierFromMailCredits(result.credits);
-        await this.prisma.account.update({
-          where: { id: result.accountId },
+        await this.prisma.account.updateMany({
+          // 无封禁邮件不构成解除既有封禁/失效状态的证据。
+          where: {
+            id: result.accountId,
+            ...(result.banned ? {} : { banStatus: { notIn: ['banned', 'invalid'] } }),
+          },
           data: {
             banStatus: result.banned ? 'banned' : 'normal',
             banReason: result.banned ? result.banReason : null,
             banKeywords: result.banned ? JSON.stringify(result.banKeywords) : null,
             banCheckedAt: new Date(),
-            ...(tier > 0 ? { credits: tier } : {}),
           },
         });
+        if (tier > 0) {
+          await this.prisma.account.updateMany({ where: { id: result.accountId }, data: { credits: tier } });
+        }
       } catch (error) {
         this.logger.warn(`回写取件结果失败：${error instanceof Error ? error.message : error}`);
       }
@@ -748,32 +746,23 @@ export class RedeemService {
     };
   }
 
-  /** 按 key 列表导出账号（四段式凭据行 / 仅邮箱） */
-  async exportPickup(payload: { keys?: string[]; kind?: string }) {
-    const keys = (payload?.keys || []).map((key) => String(key).trim().toLowerCase()).filter(Boolean);
-    const kind = payload?.kind === 'email' ? 'email' : 'line';
-    if (!keys.length) return { content: '', filename: `pickup-export-${kind}.txt` };
-
-    const accounts = (await this.prisma.account.findMany({
-      where: { OR: [{ email: { in: keys } }, { name: { in: keys } }] },
-      include: { mailbox: true },
-    })) as AccountWithMailbox[];
-
-    const byEmail = new Map<string, AccountWithMailbox>();
-    for (const account of accounts) {
-      const email = (account.mailbox?.email || account.email || account.name || '').toLowerCase();
-      if (email) byEmail.set(email, account);
+  /** 导出同样需要卡密或自带凭据，禁止用邮箱 key 查询库内秘密。 */
+  async exportPickup(payload: { records?: PickupRecordInput[]; kind?: string; category?: string }) {
+    if (!Array.isArray(payload?.records) || payload.records.length > MAX_CARDS) {
+      bizError('BAD_INPUT', `请提供 records（最多 ${MAX_CARDS} 条），每条包含卡密或完整凭据`);
     }
-
+    const kind = payload?.kind === 'email' ? 'email' : 'line';
     const lines: string[] = [];
-    for (const key of keys) {
-      const account = byEmail.get(key);
+    for (const item of payload.records) {
+      const prepared = await this.preparePickupRecord(item);
       if (kind === 'email') {
-        lines.push(key);
+        if (looksEmail(prepared.email)) lines.push(prepared.email);
         continue;
       }
-      const credential = account ? this.credentialOf(account) : this.mailbox.parseCredential(key);
-      if (!credential) continue;
+      const credential = prepared.credential;
+      if (!this.mailbox.isComplete(credential)) {
+        bizError('UNAUTHORIZED', '导出凭据需要有效卡密或用户自行提供的完整凭据', 403);
+      }
       lines.push(
         credential.line ||
           [
@@ -787,35 +776,9 @@ export class RedeemService {
 
     return {
       content: `${lines.join('\n')}\n`,
-      filename: `pickup-export-${kind}.txt`,
-    };
-  }
-
-  /** 按取件结果分类导出 */
-  async exportPickupClassified(payload: { keys?: string[]; category?: string }) {
-    const keys = (payload?.keys || []).map((key) => String(key).trim().toLowerCase()).filter(Boolean);
-    const accounts = (await this.prisma.account.findMany({
-      where: keys.length ? { OR: [{ email: { in: keys } }, { name: { in: keys } }] } : { OR: [{ email: { in: keys } }] },
-      include: { mailbox: true },
-    })) as AccountWithMailbox[];
-
-    const lines = accounts
-      .map((account) => this.credentialOf(account))
-      .filter((credential): credential is MailboxCredential => Boolean(credential))
-      .map(
-        (credential) =>
-          credential.line ||
-          [
-            credential.email,
-            credential.password || '',
-            credential.clientId || '',
-            credential.refreshToken || '',
-          ].join('----'),
-      );
-
-    return {
-      content: `${lines.join('\n')}\n`,
-      filename: `pickup-${payload?.category || 'all'}.txt`,
+      filename: payload.category && payload.category !== 'all'
+        ? `pickup-${safeFilename(payload.category, 'export')}.txt`
+        : `pickup-export-${kind}.txt`,
     };
   }
 }

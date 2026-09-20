@@ -30,11 +30,13 @@ HTTP 4xx/5xx，body：
 }
 ```
 
-`code` 取值：`BAD_INPUT` | `UNAUTHORIZED` | `NOT_FOUND` | `CARD_INVALID` | `CARD_DISABLED` | `CREDITS_PENDING` | `NO_STOCK` | `CONFLICT` | `PICKUP_FAILED` | `UPSTREAM_ERROR` | `INTERNAL`
+`code` 取值：`BAD_INPUT` | `UNAUTHORIZED` | `NOT_FOUND` | `CARD_INVALID` | `CARD_DISABLED` | `CARD_ALLOCATED` | `CREDITS_PENDING` | `NO_STOCK` | `CONFLICT` | `PICKUP_FAILED` | `UPSTREAM_ERROR` | `INTERNAL`
 
 ### 鉴权
 
 后台接口需要 `Authorization: Bearer <token>`。token 由 `POST /api/auth/login` 下发（JWT，有效期 7 天）。
+
+每次请求检查管理员是否存在、角色以及 `sessionVersion`。修改密码立即撤销该管理员所有旧 token；升级前不带会话版本的 token 也需要重新登录。
 
 ### 枚举
 
@@ -60,6 +62,7 @@ HTTP 4xx/5xx，body：
 {
   "siteName": "Cardline",
   "siteSubtitle": "SECURE DELIVERY",
+  "redeemLimitPerCard": 1,
   "formats": [
     { "value": "sub2api", "label": "sub2api", "ext": "json", "hint": "sub2api 导入 JSON" },
     { "value": "cpa", "label": "CPA", "ext": "json", "hint": "Codex CPA auth JSON" },
@@ -97,7 +100,9 @@ HTTP 4xx/5xx，body：
 | --- | --- | --- | --- |
 | `cards` | string[] | 是 | 卡密数组，服务端会按换行/空格/逗号/分号二次切分，去重，最多 500 条 |
 | `format` | `deliverFormat` | 是 | 交付格式 |
-| `limit` | number | 否 | 每张卡本次取用账号数量，默认 1，最大 20。首次兑换后该卡的账号集合已被锁定，`limit` 只影响首次 |
+| `limit` | number | 否 | 默认使用后台 `redeemLimitPerCard`（初始值 1），请求值不得超过该配置，配置最大 20；仅影响首次兑换 |
+
+首次兑换在同一事务中占用主账号和同档位附加账号，全部写入 `redeemedByCard`；交付转换失败会回滚占用。重复兑换按归属返回同一集合。附加账号自己的卡密不能再次兑换或读取该账号邮箱。已交付账号禁止重置为未兑换或重新生成卡密；管理员物理删除账号会影响后续重复下载。旧数据归属恢复限制见 [升级说明](UPGRADE.md)。
 
 响应：
 
@@ -149,7 +154,7 @@ HTTP 4xx/5xx，body：
 }
 ```
 
-失败 `code` 取值：`CARD_INVALID` 卡密不存在 / `NO_STOCK` 该额度已无可用账号 / `CARD_DISABLED` 卡密已停用 / `CREDITS_PENDING` 账号额度待定（邮箱取件还没命中额度关键字，不进兑换池）。
+失败 `code` 取值：`CARD_INVALID` 卡密不存在 / `NO_STOCK` 账号已封禁、凭据失效或无可用库存 / `CARD_DISABLED` 卡密已停用 / `CARD_ALLOCATED` 账号已由另一张卡密交付 / `CREDITS_PENDING` 账号额度待定（邮箱取件还没命中额度关键字，不进兑换池）。
 
 #### `mergedContent` —— 批量下载
 
@@ -207,6 +212,7 @@ HTTP 4xx/5xx，body：
       "key": "abc@outlook.com",
       "email": "abc@outlook.com",
       "source": "line",
+      "line": "abc@outlook.com----pwd----clientid----rt...",
       "complete": true,
       "fromCard": null,
       "credits": null,
@@ -245,6 +251,8 @@ HTTP 4xx/5xx，body：
 `source` 取值：`line`（四段式凭据行）/ `json`（从 JSON 中提取）/ `card`（卡密，服务端补全凭据）/ `email`（只有邮箱）。
 `key` 为去重键（邮箱小写）。
 
+只有用户自带的凭据行或 JSON 会返回规范化 `line`，前端在后续取件/导出请求中原样传回。裸邮箱始终为 `complete: false`，不查库存、不返回账号关联或库内凭据。有效卡密可解析其交付集合的全部邮箱；停用卡及已分配给其他卡的附加卡不可用。
+
 ### 1.4 `POST /api/public/pickup/fetch`
 
 执行取件（官方直连 Outlook）。服务端并发上限 4，单账号超时 30s，最多返回最新 10 封邮件。
@@ -261,7 +269,9 @@ HTTP 4xx/5xx，body：
 }
 ```
 
-- `line` 可省略或传 `null`。**凭据解析优先级**：`line`（且必须完整）→ 按 `fromCard` / `key` 回查数据库中的邮箱凭据 → `key` 本身（仅有邮箱时取件会返回「凭据不完整」）。
+- 提供 `line` 时只使用用户自带凭据，不关联库存；即使同时伪造 `key` 或 `fromCard` 也不会回写库内账号。
+- 不提供 `line` 时必须提供有效 `fromCard`，且 `key` 对应邮箱必须属于该卡交付的集合。仅凭邮箱不能查询库内凭据或取件。
+- 只有有效卡密取件且 `query` 为空时才回写库存状态；未发现封禁邮件不会清除已有 `banned` / `invalid` 状态。
 - 单次最多 20 条记录。
 
 响应：
@@ -280,8 +290,8 @@ HTTP 4xx/5xx，body：
       "credits": 500,
       "creditsBalance": 20,
       "latestCode": "123456",
-      "accountId": 12,
-      "cardKey": "CARD-XXXXX-XXXXX-XXXXX",
+      "accountId": null,
+      "cardKey": null,
       "fetchedAt": "2026-02-11T08:20:00.000Z",
       "messages": [
         {
@@ -310,20 +320,25 @@ HTTP 4xx/5xx，body：
 
 ### 1.5 `POST /api/public/pickup/export`
 
-按分类导出账号（供前台「导出正常/异常/封禁」按钮使用）。返回纯文本。
+导出已授权的账号凭据或邮箱（供前台「导出可取件账号」使用）。返回纯文本。
 
 请求：
 
 ```json
 {
-  "keys": ["abc@outlook.com"],
+  "records": [
+    { "key": "abc@outlook.com", "fromCard": "CARD-XXXXX-XXXXX-XXXXX" },
+    { "key": "other@outlook.com", "line": "other@outlook.com----pwd----clientid----rt..." }
+  ],
   "kind": "line"
 }
 ```
 
 `kind`：`line`（四段式凭据行）/ `email`（仅邮箱）
 
-响应 `text/plain`，附件头 `Content-Disposition: attachment; filename="pickup-export.txt"`。
+`records` 使用与取件接口相同的授权规则。缺少记录返回 HTTP 400；记录无有效授权返回 HTTP 403（`UNAUTHORIZED`），不返回部分凭据。旧版仅提交 `keys` 的调用需要升级。可选 `category` 只控制附件文件名，不绕过授权。
+
+响应 `text/plain`，默认附件头 `Content-Disposition: attachment; filename="pickup-export-line.txt"`（仅邮箱模式为 `pickup-export-email.txt`）。
 
 ---
 
@@ -356,6 +371,8 @@ HTTP 4xx/5xx，body：
 ```
 
 响应：`{ "ok": true }`
+
+成功后递增 `AdminUser.sessionVersion`，当前及其他设备的旧 token 立即失效，前端应清理登录态并回到登录页。
 
 ---
 
@@ -501,6 +518,7 @@ HTTP 4xx/5xx，body：
 
 > `credits` 是**兜底纠错通道**（正常流程由取件自动定档，后台 UI 不暴露）。
 > 传 `0` 可把账号退回「待定档」，此时该卡不再可兑换。
+> 已有 `redeemedByCard` 归属的账号不能重置为 `unredeemed`，以免重复出售。
 
 ### 3.5 `POST /api/admin/accounts/batch-delete`
 
@@ -564,7 +582,7 @@ HTTP 4xx/5xx，body：
 
 - **封禁状态**：邮箱取件 → 扫描最新 10 封邮件的 `subject + bodyPreview + body`，命中封禁关键词（`account deactivated` / `suspended` / `disabled` / `permanently deleted` / `账户已停用` / `账号已被封禁` 等）→ `banned`；取件成功且未命中 → `normal`；OAuth 换 token 失败（`invalid_grant` / `unauthorized_client`）→ `invalid`（凭据失效，非封禁）；网络错误 → 保持原状态并返回 `error`。
 - **额度定档**：同一次取件结果里命中额度关键字（`we've added N credits` / `添加了 N 额度` / `N クレジット` / `N créditos` …）→ 写回 `Account.credits = floor(N ÷ 25)`，计入 `hit`；取件成功但没命中 → 保持原值（导入时为 `0` = 待定档），计入 `pending`；取件失败 → `failed`。**未命中的账号不会被清空已有档位。**
-- **兑换状态**：读取账号自身 `access_token` 的 JWT `exp`；若已过期则用 `refresh_token` 向 OpenAI OAuth 端点刷新。刷新成功 → 账户仍活跃，同时把新 `access_token` / `refresh_token` 回写数据库；刷新失败（`invalid_grant`）→ 标记 `invalid` 并计入 `failed`。**账号被他人使用过（`access_token` 与导入时不一致或 `last_refresh` 推进）视为 `redeemed` 并记录 `redeemedAt`。**
+- **凭据检查（兼容参数 `redeem`）**：读取 `Account.expiresAt`，缺失时读取 `access_token` 的 JWT `exp`；仅在确认过期时使用账号自己的 OpenAI `refresh_token` 刷新，不使用微软邮箱 token。成功只条件更新 OAuth 字段，不将正常轮换推断为已兑换，也不覆盖封禁状态。凭据失效时标记 `invalid`（保留已有 `banned`）并计入 `failed`；有效期未知或缺少刷新凭据返回原因。汇总状态与返回 `items` 均使用刷新后的数据库记录。
 
 ### 3.8 `GET /api/admin/accounts/:id/mailbox`
 
@@ -701,6 +719,7 @@ model AdminUser {
   id           Int      @id @default(autoincrement())
   username     String   @unique
   passwordHash String
+  sessionVersion Int    @default(0)
   displayName  String   @default("管理员")
   role         String   @default("admin")
   createdAt    DateTime @default(now())
@@ -740,6 +759,7 @@ model Account {
   banCheckedAt  DateTime?
   redeemStatus  String    @default("unredeemed")
   redeemedAt    DateTime?
+  redeemedByCard String?                     // 实际交付使用的主卡密
   redeemCount   Int       @default(0)
   copyCount     Int       @default(0)
   batchId       String?
@@ -755,7 +775,13 @@ model Account {
   @@index([credits])
   @@index([banStatus])
   @@index([redeemStatus])
+  @@index([redeemedByCard])
   @@index([email])
+}
+
+model SchemaMigration {
+  version   Int      @id
+  appliedAt DateTime @default(now())
 }
 
 model MailCredential {

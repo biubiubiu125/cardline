@@ -35,8 +35,7 @@ function resolveDatabaseFile() {
 const absolute = resolveDatabaseFile();
 fs.mkdirSync(path.dirname(absolute), { recursive: true });
 
-const statementsModule = require(path.resolve(__dirname, '..', 'dist', 'prisma', 'schema-statements.js'));
-const STATEMENTS = statementsModule.SCHEMA_STATEMENTS;
+const { initializeSchema } = require(path.resolve(__dirname, '..', 'dist', 'prisma', 'initialize-schema.js'));
 
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient({
@@ -45,15 +44,13 @@ const prisma = new PrismaClient({
 
 async function main() {
   console.log(`[bootstrap-db] 目标数据库：${absolute}`);
-  for (const statement of STATEMENTS) {
-    await prisma.$executeRawUnsafe(statement);
-  }
+  await initializeSchema(prisma);
   try {
     await prisma.$queryRawUnsafe('PRAGMA journal_mode = WAL;');
   } catch {
     /* 忽略 */
   }
-  console.log(`[bootstrap-db] 表结构就绪（共 ${STATEMENTS.length} 条语句）`);
+  console.log('[bootstrap-db] 表结构与版本迁移就绪');
 }
 
 main()
