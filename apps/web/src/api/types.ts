@@ -8,7 +8,7 @@
  * 枚举
  * ------------------------------------------------------------------ */
 
-/** 交付格式 `deliverFormat` */
+/** 交付格式 `deliverFormat`；email 有 ChatGPT 密码或 2FA 时输出六段，否则为四段。 */
 export type DeliverFormat = 'sub2api' | 'cpa' | 'email';
 
 /** 取件导出分类 */

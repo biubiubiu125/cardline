@@ -717,31 +717,50 @@ export class ConvertService {
     return list.length === 1 ? list[0] : list;
   }
 
-  /** 邮箱 TXT：每行四段式凭据 */
+  /** 邮箱 TXT 的附加登录信息；原始 notes 独立于邮箱取件凭据保存。 */
+  private readEmailLoginFields(account: NormalizedAccount): { password?: string; twoFactorSecret?: string } {
+    for (const value of [account.raw?.notes, account.raw?.note]) {
+      let notes = value;
+      if (typeof notes === 'string') {
+        const parsed = this.tryParseJson(notes);
+        if (!parsed.ok) continue;
+        notes = parsed.value;
+      }
+      if (!isPlainObject(notes)) continue;
+
+      const password = get(notes, 'gpt.password');
+      const secret = get(notes, 'two_factor.secret');
+      return {
+        password: typeof password === 'string' && password.trim() ? password : undefined,
+        twoFactorSecret: typeof secret === 'string' && secret.trim() ? secret : undefined,
+      };
+    }
+    return {};
+  }
+
+  /** 邮箱 TXT：有 ChatGPT 密码或 2FA 时输出六段，否则保留四段。 */
   toEmailLines(accounts: NormalizedAccount[]): string[] {
     return accounts
       .map((account) => {
         const mailbox = account.mailbox;
-        const line =
-          mailbox?.line ||
-          (mailbox?.email
-            ? [mailbox.email, mailbox.password || '', mailbox.clientId || '', mailbox.refreshToken || ''].join(
-                '----',
-              )
-            : '');
-        if (!line.endsWith('----') && line.split('----').length >= 4 && looksEmail(line.split('----')[0])) {
-          return line;
-        }
-        // 凭据不全时退化为「邮箱----密码----clientid----refresh_token」的空位形式
-        if (mailbox?.email) {
-          return [
+        let line = mailbox?.line || '';
+        const parts = line.split('----');
+        if (line.endsWith('----') || parts.length < 4 || !looksEmail(parts[0])) {
+          if (!mailbox?.email) return '';
+          // 凭据不全时仍保留四个邮箱字段的位置。
+          line = [
             mailbox.email,
             mailbox.password || '',
             mailbox.clientId || '',
             mailbox.refreshToken || '',
           ].join('----');
         }
-        return '';
+
+        const { password, twoFactorSecret } = this.readEmailLoginFields(account);
+        if (password || twoFactorSecret) {
+          return [line, password || '', twoFactorSecret || ''].join('----');
+        }
+        return line;
       })
       .filter((line) => Boolean(line) && looksEmail(line.split('----')[0]));
   }

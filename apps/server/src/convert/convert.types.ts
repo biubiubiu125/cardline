@@ -94,7 +94,7 @@ export interface ConvertedItem {
   account: NormalizedAccount;
   cpa: CpaAccount;
   sub2api: Sub2ApiAccount;
-  /** 四段式取件凭据行，可能为空 */
+  /** 邮箱 TXT 交付行：四段邮箱凭据，或附带 ChatGPT 密码 / 2FA 的六段；可能为空 */
   emailLine?: string;
 }
 

@@ -66,7 +66,7 @@ HTTP 4xx/5xx，body：
   "formats": [
     { "value": "sub2api", "label": "sub2api", "ext": "json", "hint": "sub2api 导入 JSON" },
     { "value": "cpa", "label": "CPA", "ext": "json", "hint": "Codex CPA auth JSON" },
-    { "value": "email", "label": "邮箱 TXT", "ext": "txt", "hint": "邮箱----密码----clientid----refresh_token" }
+    { "value": "email", "label": "邮箱 TXT", "ext": "txt", "hint": "四段邮箱凭据；有 ChatGPT 密码或 2FA 时导出六段" }
   ],
   "creditTiers": [10, 20, 40],
   "stats": {
@@ -163,7 +163,7 @@ HTTP 4xx/5xx，body：
 | 格式 | 合并文件结构 |
 | --- | --- |
 | `sub2api` | `{ type: "sub2api-data", version, exported_at, proxies: [], accounts: [所有账号] }` |
-| `email` | 所有卡密的四段式凭据行直接拼接，不带任何分隔标题 |
+| `email` | 所有卡密的四段或六段凭据行直接拼接，不带任何分隔标题；每个账号独立判断是否附带账密 / 2FA |
 | `cpa` | **恒为 `null`** —— CPA 没有「合并成一份」的形态，下游要的是一个个独立的 Codex auth 文件；前台改为把各卡 `content` 打包成 zip（每张卡一个 `<卡密>.cpa.json`） |
 
 合并文件可被本服务原样再导入（`POST /api/admin/accounts/import`）。
@@ -178,9 +178,20 @@ HTTP 4xx/5xx，body：
 | --- | --- | --- |
 | `sub2api` | 账号对象的 `extra`（原字段原样 + 服务端补充的 `email` / `email_key` / `name` / `mailbox_*` / `source`） | 标记在 `extra.two_factor_*`；TOTP **密钥**在 `notes.two_factor.secret` |
 | `cpa` | 账号对象的 `extra`（仅原字段原样，不注入服务端补充键） | 只有 `extra.two_factor_*` 标记；CPA 无 `notes`，**不含** TOTP 密钥 |
-| `email` | 无 | 无（只有四段式凭据行） |
+| `email` | 无 | 有 ChatGPT 密码或 TOTP 密钥时输出六段，第六段为 TOTP 密钥；缺失项留空 |
 
 `extra` 的空串字段（如 `two_factor_error: ""`）按原样保留，保证交付文件与导入文件逐字段一致。来源没有 `extra` 时产物不写该键；CPA 的 `extra` 键集合与来源完全一致（含来源里本来就有的 `mailbox_*`）。
+
+邮箱 TXT 的格式根据每个账号的登录信息决定：
+
+```text
+邮箱----邮箱密码----client_id----邮箱refresh_token
+邮箱----邮箱密码----client_id----邮箱refresh_token----ChatGPT密码----2FA密钥
+```
+
+第五段读取原始 JSON 的 `notes` 内部 `gpt.password`，第六段读取 `two_factor.secret`。支持 `notes` 为 JSON 字符串或对象，也兼容单数 `note`；不要求该备注同时包含 `mailbox`。这两项至少一项为非空字符串时输出六段，缺失的一项留空；两项都没有时保持四段。仅有 `extra.two_factor_enabled` 等标记不视为提供了密钥。密码中的特殊字符按原文保留。
+
+该规则适用于单卡 / 批量兑换及后台账号导出，已有账号从 `rawJson` 读取，无需数据库迁移或重新导入。`POST /api/public/pickup/export` 的 `kind: "line"` 仍只输出四段邮箱取件凭据。
 
 ### 1.3 `POST /api/public/pickup/resolve`
 
@@ -657,6 +668,8 @@ HTTP 4xx/5xx，body：
 ```
 
 响应 `text/plain`（`email` 格式）或 `application/json`（`sub2api` / `cpa`），带 `Content-Disposition`。
+
+`email` 使用与卡密兑换相同的四段 / 六段规则：包含 ChatGPT 密码或 2FA 密钥时追加第五、六段，缺失项留空。
 
 ### 3.10 `GET /api/admin/stats/overview`
 

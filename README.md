@@ -148,7 +148,11 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 | --- | --- | --- |
 | `sub2api` | `<卡密>.sub2api.json` | `{ type: "sub2api-data", version, exported_at, proxies, accounts[] }`，每个账号含 `credentials`，并在 `notes` 里保留邮箱取件凭据 |
 | `cpa` | `<卡密>.cpa.json` | `{ type: "codex", access_token, id_token, refresh_token, email, account_id, plan_type, expired }`；单账号输出对象，多账号输出数组。来源有 `extra` 时随产物带上（见下） |
-| `email` | `<卡密>.txt` | 每行 `邮箱----密码----clientid----refresh_token` |
+| `email` | `<卡密>.txt` | 默认四段邮箱凭据；有 ChatGPT 密码或 2FA 时输出六段（见下） |
+
+邮箱 TXT 的六段顺序为 `邮箱----邮箱密码----client_id----邮箱refresh_token----ChatGPT密码----2FA密钥`。第五、六段来自导入 JSON 的 `notes.gpt.password` 和 `notes.two_factor.secret`（`notes` 内部字段），支持 `notes` 为 JSON 字符串或对象，也兼容单数 `note`。只提供一项时另一项留空；两项都没有时仍输出四段。仅有 `two_factor_enabled` 等状态标记不会追加 2FA 段。
+
+此规则用于兑换下载、批量下载和后台账号导出，直接读取已保存的原始 JSON，已有账号无需重新导入。邮箱取件页的凭据导出仍为四段。
 
 **批量下载（兑换页底部按钮）**：多张卡密一次兑换后，逐卡下载拿到的是 N 份独立文件；批量按钮按格式给不同的东西：
 

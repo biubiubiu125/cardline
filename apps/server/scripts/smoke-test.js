@@ -224,6 +224,7 @@ async function main() {
 
   // -------------------------------------------------------------------------
   console.log('\n[6] 前台兑换（三种交付格式）');
+  let expectedEmailParts;
   for (const format of ['sub2api', 'cpa', 'email']) {
     const redeem = await call('POST', '/public/redeem', { cards: [first.cardKey], format, limit: 1 });
     const result = redeem.json?.results?.[0];
@@ -237,7 +238,9 @@ async function main() {
 
     if (format === 'email') {
       const lines = String(result.content).trim().split('\n');
-      assert(lines[0].split('----').length >= 4, '邮箱 TXT 为四段式凭据行', lines[0].slice(0, 70));
+      const parts = lines[0].split('----');
+      assert(parts.length === 6, '带账密 / 2FA 的邮箱 TXT 为六段');
+      assert(JSON.stringify(parts) === JSON.stringify(expectedEmailParts), '六段字段顺序正确且账密 / 2FA 内容完整');
     } else {
       const parsed = JSON.parse(result.content);
       if (format === 'sub2api') {
@@ -246,6 +249,14 @@ async function main() {
         assert(Boolean(account.credentials?.access_token), 'sub2api credentials.access_token 存在');
         assert(Boolean(account.notes), 'sub2api notes 保留了邮箱取件凭据');
         const notes = JSON.parse(account.notes);
+        expectedEmailParts = [
+          notes.mailbox?.bind_email || notes.mailbox?.primary_email,
+          notes.mailbox?.password || '',
+          notes.mailbox?.client_id || '',
+          notes.mailbox?.refresh_token || '',
+          notes.gpt?.password || '',
+          notes.two_factor?.secret || '',
+        ];
         assert(Boolean(notes.mailbox?.refresh_token), 'notes.mailbox.refresh_token 存在');
         assert(Boolean(notes.mailbox?.source_line), 'notes.mailbox.source_line 存在');
         assert(Boolean(notes.two_factor?.secret), 'notes.two_factor.secret（2FA 密钥）保留', notes.two_factor?.secret ? '有' : '缺');
@@ -304,7 +315,7 @@ async function main() {
   });
   assert(resolved.json?.records?.length === 2, '解析出多条记录', `total=${resolved.json?.summary?.total}`);
   const lineRecord = resolved.json.records.find((row) => row.source === 'line');
-  assert(lineRecord?.complete === true, '四段式凭据行解析成功');
+  assert(lineRecord?.complete === true, '六段式交付行可解析为邮箱取件凭据');
   assert(resolved.json?.unknown?.length === 1, '无法识别的输入被单独返回', JSON.stringify(resolved.json?.unknown));
 
   const byCard = await call('POST', '/public/pickup/resolve', { input: first.cardKey });
@@ -326,6 +337,7 @@ async function main() {
   assert(mailbox.json?.account?.id === first.id, '返回账号信息');
   assert(mailbox.json?.mailbox?.clientId, '返回邮箱 clientId');
   assert(Boolean(mailbox.json?.mailbox?.line), '返回四段式凭据行');
+  assert(lineRecord?.line === mailbox.json?.mailbox?.line, '解析六段交付行时未把账密 / 2FA 混入邮箱 token');
   assert(mailbox.json?.pickup !== undefined, '返回取件结果对象', mailbox.json?.pickup?.ok ? '取件成功' : `取件失败：${mailbox.json?.pickup?.error?.slice(0, 60)}`);
   if (mailbox.json?.pickup?.ok) {
     assert(Array.isArray(mailbox.json?.messages), '返回邮件列表', `${mailbox.json.messages.length} 封`);
@@ -356,7 +368,7 @@ async function main() {
   const pickupExport = await call('POST', '/public/pickup/export', {
     records: [{ key: lookupKey, fromCard: first.cardKey }], kind: 'line',
   });
-  assert(pickupExport.text.trim() === emailLine, '有效卡密可导出对应邮箱凭据');
+  assert(pickupExport.text.trim() === mailbox.json?.mailbox?.line, '有效卡密可导出对应四段邮箱取件凭据');
 
   // -------------------------------------------------------------------------
   console.log('\n[8.2] 前台取件：只传卡密（fromCard）');
@@ -409,6 +421,9 @@ async function main() {
     }, { allowFailure: true });
     assert(exported.status === 200, `导出 ${format} 成功`, `HTTP ${exported.status}, ${exported.text.length} 字节`);
     assert(Boolean(exported.headers.get('content-disposition')), `导出 ${format} 带附件文件名`, exported.headers.get('content-disposition'));
+    if (format === 'email') {
+      assert(exported.text.trim().split('\n').includes(emailLine), '后台邮箱 TXT 与兑换交付的六段内容一致');
+    }
   }
 
   // -------------------------------------------------------------------------

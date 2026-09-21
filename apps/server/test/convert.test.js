@@ -173,15 +173,98 @@ test('缺少 id_token 时构造 Codex 可解析的占位 JWT', () => {
   assert.equal(payload['https://api.openai.com/auth'].chatgpt_account_id, 'acct-bare');
 });
 
-test('邮箱 TXT 交付：每行都是四段式凭据行', () => {
-  const { items } = service.parseAccounts(JSON.stringify(sub2apiSample()));
+test('邮箱 TXT 交付：没有 ChatGPT 密码和 2FA 时保留四段', () => {
+  const sample = sub2apiSample();
+  const notes = JSON.parse(sample.accounts[0].notes);
+  delete notes.gpt;
+  sample.accounts[0].notes = JSON.stringify(notes);
+  const { items } = service.parseAccounts(JSON.stringify(sample));
   const lines = service.toEmailLines(items.map((item) => item.account));
   assert.equal(lines.length, 1);
   const parts = lines[0].split('----');
+  assert.equal(parts.length, 4);
   assert.equal(parts[0], 'user@outlook.com');
   assert.equal(parts[1], 'jpqxdw31909');
   assert.equal(parts[2], '9e5f94bc-e8a4-4e73-b8be-63364c29d753');
   assert.match(parts[3], /^M\.C528_BAY/);
+});
+
+test('邮箱 TXT 交付：账密和 2FA 输出六段，兼容 notes/note 的字符串和对象', () => {
+  for (const field of ['notes', 'note']) {
+    for (const asString of [true, false]) {
+      const sample = sub2apiSample();
+      const record = sample.accounts[0];
+      const notes = JSON.parse(record.notes);
+      notes.gpt.password = ' @Demo$pa*ss! ';
+      notes.two_factor = { secret: 'JBSWY3DPEHPK3PXP' };
+      delete record.notes;
+      record[field] = asString ? JSON.stringify(notes) : notes;
+
+      const { items, issues } = service.parseAccounts(JSON.stringify(sample));
+      assert.equal(issues.length, 0);
+      const expected = `${notes.mailbox.source_line}----${notes.gpt.password}----${notes.two_factor.secret}`;
+      assert.equal(service.buildDeliverContent('email', [items[0].account]), `${expected}\n`);
+      assert.equal(items[0].emailLine, expected);
+      assert.equal(items[0].account.mailbox.line, notes.mailbox.source_line, '取件凭据不能混入登录信息');
+      assert.equal(items[0].account.mailbox.refreshToken, notes.mailbox.refresh_token);
+    }
+  }
+});
+
+test('邮箱 TXT 交付：仅密码或仅 2FA 时固定保留六段和空位', () => {
+  for (const fields of [
+    { gpt: { password: 'GPT-DEMO-ONLY' } },
+    { two_factor: { secret: 'JBSWY3DPEHPK3PXP' } },
+  ]) {
+    const sample = sub2apiSample();
+    const notes = JSON.parse(sample.accounts[0].notes);
+    delete notes.gpt;
+    Object.assign(notes, fields);
+    sample.accounts[0].notes = JSON.stringify(notes);
+    const { items } = service.parseAccounts(JSON.stringify(sample));
+    const parts = service.toEmailLines([items[0].account])[0].split('----');
+    assert.equal(parts.length, 6);
+    assert.equal(parts[4], fields.gpt?.password || '');
+    assert.equal(parts[5], fields.two_factor?.secret || '');
+    assert.equal(parts[3], notes.mailbox.refresh_token);
+  }
+});
+
+test('邮箱 TXT 交付：notes 缺少 mailbox 仍能追加账密和 2FA', () => {
+  const raw = sub2apiSample().accounts[0];
+  const mailbox = service.extractMailbox(raw);
+  raw.notes = JSON.stringify({ gpt: { password: 'GPT-DEMO-ONLY' }, two_factor: { secret: 'JBSWY3DPEHPK3PXP' } });
+  const normalized = { ...service.normalizeAccount(raw), mailbox };
+  assert.equal(service.toEmailLines([normalized])[0], `${mailbox.line}----GPT-DEMO-ONLY----JBSWY3DPEHPK3PXP`);
+  normalized.mailbox = { email: 'user@outlook.com' };
+  assert.deepEqual(service.toEmailLines([normalized])[0].split('----'), [
+    'user@outlook.com', '', '', '', 'GPT-DEMO-ONLY', 'JBSWY3DPEHPK3PXP',
+  ]);
+});
+
+test('邮箱 TXT 交付：缺失、无效和空的登录信息不改变四段格式', () => {
+  const raw = sub2apiSample().accounts[0];
+  const normalized = service.normalizeAccount(raw);
+  const expected = normalized.mailbox.line;
+  for (const notes of [undefined, 'not-json', '[]', 'null', {},
+    { gpt: { password: '' }, two_factor: { secret: '   ', enabled: true } },
+    { gpt: { password: 123 }, two_factor: { secret: false } },
+  ]) {
+    normalized.raw = { ...raw, notes };
+    assert.equal(service.toEmailLines([normalized])[0], expected);
+  }
+});
+
+test('邮箱 TXT 交付：合并四段和六段时保持顺序及邮箱 token 原文', () => {
+  const { items } = service.parseAccounts(JSON.stringify(sub2apiSample()));
+  const withLogin = items[0].account;
+  const token = 'M.' + 'x'.repeat(64) + '----token-tail';
+  const line = `user@outlook.com----mailbox-demo----00000000-0000-0000-0000-000000000001----${token}`;
+  withLogin.mailbox = { ...withLogin.mailbox, line, refreshToken: token };
+  const withoutLogin = { ...withLogin, raw: {} };
+  const password = JSON.parse(withLogin.raw.notes).gpt.password;
+  assert.equal(service.buildDeliverContent('email', [withoutLogin, withLogin]), `${line}\n${line}----${password}----\n`);
+  assert.equal(withLogin.mailbox.refreshToken, token);
 });
 
 test('多账号：CPA 输出数组，sub2api 输出整包', () => {

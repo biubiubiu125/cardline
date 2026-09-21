@@ -149,6 +149,44 @@ test('上传 JSON 自带凭据可以解析、继续取件和导出，无需存�
   assert((await f.redeem.exportPickup({ records: resolved.records, kind: 'line' })).content.includes(MS_TOKEN));
 });
 
+test('邮箱 TXT：JSON 导入落库后，后台导出和兑换均保留账密与 2FA', async (t) => {
+  const f = await fixture(t);
+  const password = '@Demo$pa*ss!';
+  const secret = 'JBSWY3DPEHPK3PXP';
+  const records = [1, 2].map((index) => {
+    const email = `delivery${index}@example.com`;
+    const notes = { mailbox: { email, password: 'mailbox-demo', client_id: CLIENT_ID, refresh_token: MS_TOKEN } };
+    if (index === 1) {
+      notes.gpt = { password };
+      notes.two_factor = { secret };
+    }
+    return { type: 'codex', email, access_token: 'synthetic-access-token', notes: JSON.stringify(notes) };
+  });
+  const imported = await f.accounts.importAccounts({ content: JSON.stringify(records) });
+  assert.equal(imported.imported, 2);
+  assert.equal(imported.failed, 0);
+  const rows = await f.prisma.account.findMany({ orderBy: { id: 'asc' }, include: { mailbox: true } });
+  assert.deepEqual(JSON.parse(rows[0].rawJson), records[0]);
+  const baseLines = rows.map((row) => `${row.email}----mailbox-demo----${CLIENT_ID}----${MS_TOKEN}`);
+  const expectedLines = [`${baseLines[0]}----${password}----${secret}`, baseLines[1]];
+  const expected = `${expectedLines.join('\n')}\n`;
+  assert.equal((await f.accounts.exportAccounts({ format: 'email', ids: rows.map((row) => row.id) })).content, expected);
+
+  await f.prisma.account.updateMany({ data: { credits: 40, banStatus: 'normal' } });
+  const request = { cards: rows.map((row) => row.cardKey), format: 'email' };
+  const delivered = await f.redeem.redeem(request);
+  assert.equal(delivered.mergedContent, expected);
+  for (const [index, result] of delivered.results.entries()) {
+    assert.equal(result.ok, true);
+    assert.equal(result.content, `${expectedLines[index]}\n`);
+  }
+  assert.equal((await f.redeem.redeem(request)).mergedContent, expected, '重复兑换保持同样的交付内容');
+  const pickup = await f.redeem.exportPickup({
+    records: [{ key: rows[0].email, fromCard: rows[0].cardKey }], kind: 'line',
+  });
+  assert.equal(pickup.content.trim(), baseLines[0], '邮箱取件的凭据导出仍只包含邮箱四段');
+});
+
 test('服务端限制每卡数量，多账号全部占用，重试不增发且附加卡不能重复领取', async (t) => {
   const f = await fixture(t, { limit: 2 });
   const [a, b, c] = await Promise.all([1, 2, 3].map((index) => createAccount(f.prisma, index)));

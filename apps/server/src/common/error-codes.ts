@@ -42,6 +42,6 @@ export const FORMAT_META: Record<
     label: '邮箱 TXT',
     ext: 'txt',
     title: '邮箱 TXT',
-    hint: '邮箱----密码----clientid----refresh_token',
+    hint: '四段邮箱凭据；有 ChatGPT 密码或 2FA 时导出六段',
   },
 };
