@@ -24,16 +24,12 @@ import {
   listCreditTiers,
   updateCard,
 } from '../../api/client';
-import type { CardRow, CardStatus, DeliverFormat } from '../../api/types';
+import { DELIVER_FORMAT_OPTIONS, type CardRow, type CardStatus, type DeliverFormat } from '../../api/types';
 import CopyButton from '../../components/CopyButton';
 import { copyCardKeys, reportCardCopy, type CardCopyScope } from '../../utils/cardCopy';
 import { CARD_STATUS_META, CARD_STATUS_OPTIONS, formatCredits, formatDateTime } from '../../utils/format';
 
-const EXPORT_ITEMS = [
-  { key: 'sub2api', label: 'sub2api' },
-  { key: 'cpa', label: 'CPA' },
-  { key: 'email', label: '邮箱TXT' },
-];
+const EXPORT_ITEMS = DELIVER_FORMAT_OPTIONS.map((item) => ({ key: item.value, label: item.label }));
 
 /**
  * 后台 · 卡密管理。

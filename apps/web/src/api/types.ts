@@ -8,8 +8,45 @@
  * 枚举
  * ------------------------------------------------------------------ */
 
-/** 交付格式 `deliverFormat`；email 有 ChatGPT 密码或 2FA 时输出六段，否则为四段。 */
-export type DeliverFormat = 'sub2api' | 'cpa' | 'email';
+/** 交付格式。email 有 ChatGPT 密码或 2FA 时输出六段，否则为四段。 */
+export type DeliverFormat =
+  | 'sub2api'
+  | 'cpa'
+  | 'cockpit'
+  | 'ninerouter'
+  | 'codex'
+  | 'axonhub'
+  | 'codex-manager'
+  | 'email';
+
+/** document 合并成一份；zip 按卡密打包。 */
+export type DeliverBundle = 'document' | 'zip';
+
+export const DELIVER_FORMAT_OPTIONS: Array<{
+  value: DeliverFormat;
+  label: string;
+  ext: string;
+  bundle: DeliverBundle;
+  hint: string;
+}> = [
+  { value: 'sub2api', label: 'sub2api', ext: 'json', bundle: 'document', hint: 'sub2api 账号 JSON' },
+  { value: 'cpa', label: 'CPA', ext: 'json', bundle: 'zip', hint: 'CPA / Codex auth JSON' },
+  { value: 'cockpit', label: 'Cockpit', ext: 'json', bundle: 'zip', hint: 'Cockpit Tools JSON' },
+  { value: 'ninerouter', label: '9router', ext: 'json', bundle: 'zip', hint: '9router 账号 JSON' },
+  { value: 'codex', label: 'Codex', ext: 'json', bundle: 'zip', hint: 'Codex CLI auth.json' },
+  { value: 'axonhub', label: 'AxonHub', ext: 'json', bundle: 'zip', hint: 'AxonHub auth.json' },
+  { value: 'codex-manager', label: 'Codex-Manager', ext: 'json', bundle: 'zip', hint: 'Codex-Manager JSON' },
+  { value: 'email', label: '邮箱 TXT', ext: 'txt', bundle: 'document', hint: '邮箱凭据文本' },
+];
+
+export function isZipDeliverFormat(
+  format: string | undefined,
+  options?: Array<{ value: string; bundle?: DeliverBundle }>,
+): boolean {
+  const fromMeta = options?.find((item) => item.value === format)?.bundle;
+  if (fromMeta) return fromMeta === 'zip';
+  return DELIVER_FORMAT_OPTIONS.find((item) => item.value === format)?.bundle === 'zip';
+}
 
 /** 取件导出分类 */
 export type PickupExportKind = 'line' | 'email';
@@ -64,7 +101,10 @@ export type RedeemResultCode =
   | 'NO_STOCK'
   | 'CARD_DISABLED'
   | 'CARD_ALLOCATED'
-  | 'CREDITS_PENDING';
+  | 'CREDITS_PENDING'
+  | 'CARD_NOT_REDEEMED'
+  | 'REFRESH_MISSING'
+  | 'REFRESH_FAILED';
 
 /* ------------------------------------------------------------------ *
  * 1.1 GET /api/public/meta
@@ -75,6 +115,7 @@ export interface FormatOption {
   label: string;
   ext: string;
   hint: string;
+  bundle?: DeliverBundle;
 }
 
 export interface PublicCreditsStat {
@@ -115,6 +156,12 @@ export interface RedeemRequest {
   format: DeliverFormat;
   /** 每张卡本次取用账号数量，默认 1，最大 20（仅首次兑换生效） */
   limit?: number;
+}
+
+/** 凭据找回只接受卡密和格式，不接受上传凭据。 */
+export interface ReclaimRequest {
+  cards: string[];
+  format: DeliverFormat;
 }
 
 export interface RedeemAccount {

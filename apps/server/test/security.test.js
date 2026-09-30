@@ -1,8 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
+const { randomBytes } = require('node:crypto');
 const bcrypt = require('bcryptjs');
 
 process.env.NODE_ENV = 'test';
@@ -27,16 +25,33 @@ global.fetch = async () => { throw new Error('回归测试禁止外部网络请�
 const CLIENT_ID = '00000000-0000-0000-0000-000000000001';
 const MS_TOKEN = 'M'.repeat(64);
 
+function postgresUrl() {
+  const url = process.env.DATABASE_URL || '';
+  if (!/^postgres(ql)?:\/\//i.test(url)) {
+    throw new Error('DATABASE_URL 必须是 PostgreSQL，回归测试不再使用 SQLite');
+  }
+  return url;
+}
+
+function urlForSchema(base, schema) {
+  const url = new URL(base);
+  url.searchParams.set('schema', schema);
+  return url.toString();
+}
+
 async function fixture(t, { legacy = false, limit = 1 } = {}) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cardline-regression-'));
-  const prisma = new PrismaClient({ datasources: { db: { url: `file:${path.join(directory, 'test.db').replaceAll('\\', '/')}` } } });
+  const base = postgresUrl();
+  const schema = `t_${randomBytes(4).toString('hex')}`;
+  const admin = new PrismaClient({ datasources: { db: { url: base } } });
+  await admin.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);
+  await admin.$disconnect();
+  const prisma = new PrismaClient({ datasources: { db: { url: urlForSchema(base, schema) } } });
   t.after(async () => {
     await prisma.$disconnect();
-    assert.equal(path.dirname(directory), os.tmpdir());
-    fs.rmSync(directory, { recursive: true, force: true });
+    const cleanup = new PrismaClient({ datasources: { db: { url: base } } });
+    await cleanup.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await cleanup.$disconnect();
   });
-  await prisma.$queryRawUnsafe('PRAGMA journal_mode = WAL;');
-  await prisma.$queryRawUnsafe('PRAGMA busy_timeout = 8000;');
   if (legacy) {
     for (const statement of SCHEMA_STATEMENTS) {
       await prisma.$executeRawUnsafe(statement
@@ -311,6 +326,95 @@ test('生产环境拒绝默认签名密钥和初始密码', () => {
       else process.env[key] = previous[key];
     }
   }
+});
+
+function reclaimService(prisma, mailbox, refresh) {
+  const settings = { getAll: async () => ({ ...DEFAULT_SETTINGS, defaultFormat: 'sub2api' }) };
+  return new RedeemService(prisma, new ConvertService(), mailbox, settings, { refresh });
+}
+
+async function markRedeemed(prisma, account) {
+  await prisma.account.update({
+    where: { id: account.id },
+    data: { redeemStatus: 'redeemed', redeemedByCard: account.cardKey, redeemedAt: new Date('2026-01-01T00:00:00Z') },
+  });
+}
+
+test('未兑换、缺少刷新凭据或刷新失败时不改库存', async (t) => {
+  const f = await fixture(t);
+  const account = await createAccount(f.prisma);
+  let calls = 0;
+  const refresh = async () => {
+    calls += 1;
+    return { ok: true, credentials: { accessToken: 'should-not-write', refreshToken: 'should-not-write' } };
+  };
+  const service = reclaimService(f.prisma, f.mailbox, refresh);
+  const fresh = await service.reclaim({ cards: [account.cardKey], format: 'cockpit' });
+  assert.equal(fresh.results[0].code, 'CARD_NOT_REDEEMED');
+  assert.equal(calls, 0);
+
+  await markRedeemed(f.prisma, account);
+  await f.prisma.account.update({ where: { id: account.id }, data: { refreshToken: null } });
+  const missing = await service.reclaim({ cards: [account.cardKey], format: 'codex' });
+  assert.equal(missing.results[0].code, 'REFRESH_MISSING');
+  assert.equal(calls, 0);
+
+  await f.prisma.account.update({ where: { id: account.id }, data: { refreshToken: 'synthetic-openai-refresh' } });
+  const failing = reclaimService(f.prisma, f.mailbox, async () => {
+    calls += 1;
+    return { ok: false, error: 'upstream' };
+  });
+  const failed = await failing.reclaim({ cards: [account.cardKey], format: 'codex' });
+  assert.equal(failed.results[0].code, 'REFRESH_FAILED');
+  const unchanged = await f.prisma.account.findUnique({ where: { id: account.id } });
+  assert.equal(unchanged.accessToken, 'synthetic-access-token');
+  assert.equal(unchanged.refreshToken, 'synthetic-openai-refresh');
+});
+
+test('找回成功只刷新一次，写库失败也不会再次请求旧凭据', async (t) => {
+  const f = await fixture(t);
+  const account = await createAccount(f.prisma);
+  await markRedeemed(f.prisma, account);
+  let calls = 0;
+  const refresh = async (token) => {
+    calls += 1;
+    assert.equal(token, calls === 1 ? 'synthetic-openai-refresh' : 'refreshed-token');
+    return {
+      ok: true,
+      credentials: {
+        accessToken: 'refreshed-access',
+        refreshToken: 'refreshed-token',
+        idToken: 'refreshed-id',
+        expiresAt: new Date('2030-01-01T00:00:00.000Z'),
+      },
+    };
+  };
+  const service = reclaimService(f.prisma, f.mailbox, refresh);
+  const result = await service.reclaim({ cards: [account.cardKey], format: 'codex' });
+  assert.equal(result.results[0].ok, true);
+  assert.equal(result.results[0].firstRedeem, false);
+  assert.equal(result.results[0].message, '凭据已刷新');
+  assert.equal(result.mergedContent, null);
+  assert.equal(calls, 1);
+  const saved = await f.prisma.account.findUnique({ where: { id: account.id } });
+  assert.equal(saved.accessToken, 'refreshed-access');
+  assert.equal(saved.refreshToken, 'refreshed-token');
+  assert.equal(saved.idToken, 'refreshed-id');
+  const log = await f.prisma.redeemLog.findFirst({ where: { cardKey: account.cardKey } });
+  assert.equal(log.format, 'reclaim:codex');
+  assert.equal(log.message, 'OK');
+  assert.equal(JSON.stringify(log).includes('refreshed-access'), false);
+
+  const original = f.prisma.$transaction.bind(f.prisma);
+  f.prisma.$transaction = async () => {
+    throw new Error('database write failed');
+  };
+  const callsBeforeWriteFailure = calls;
+  await assert.rejects(service.reclaim({ cards: [account.cardKey], format: 'codex' }));
+  assert.equal(calls - callsBeforeWriteFailure, 1);
+  f.prisma.$transaction = original;
+  const still = await f.prisma.account.findUnique({ where: { id: account.id } });
+  assert.equal(still.refreshToken, 'refreshed-token');
 });
 
 test('管理员初始化日志不包含密码', async (t) => {

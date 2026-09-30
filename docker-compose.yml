@@ -1,19 +1,43 @@
 name: cardline
 
 services:
+  postgres:
+    image: postgres:16
+    container_name: cardline-postgres
+    restart: unless-stopped
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      PGTZ: "${TZ:-Asia/Shanghai}"
+      POSTGRES_USER: "${POSTGRES_USER:?请设置 POSTGRES_USER}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:?请设置 POSTGRES_DB}"
+    command: ["postgres", "-c", "timezone=Asia/Shanghai", "-c", "log_timezone=Asia/Shanghai"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - cardline-postgres:/var/lib/postgresql/data
+    networks:
+      - cardline-data
+
   server:
     build:
       context: .
       dockerfile: docker/Dockerfile.server
     # 默认指向 GitHub Actions 推送到 GHCR 的镜像；改 CARDLINE_REGISTRY 可换成别的仓库
-    image: "${CARDLINE_REGISTRY:-ghcr.io/zhoudashuaibi}/cardline-server:${CARDLINE_TAG:-latest}"
+    image: "${CARDLINE_REGISTRY:-ghcr.io/biubiubiu125}/cardline-server:${CARDLINE_TAG:-latest}"
     container_name: cardline-server
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0
-      DATABASE_URL: "file:/data/cardline.db"
+      DATABASE_URL: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public"
       JWT_SECRET: "${JWT_SECRET:?请设置至少32字符的随机JWT_SECRET}"
       JWT_EXPIRES_IN: "${JWT_EXPIRES_IN:-7d}"
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
@@ -24,19 +48,18 @@ services:
       PICKUP_MAX_MESSAGES: "${PICKUP_MAX_MESSAGES:-30}"
       CARD_PREFIX: "${CARD_PREFIX:-CARD}"
       TZ: "${TZ:-Asia/Shanghai}"
-    volumes:
-      - cardline-data:/data
-    # 需要直接从宿主机访问接口时打开
+    # 需要直接从宿主机访问接口时打开。默认不发布，只让 cardline-web 访问。
     # ports:
     #   - "3000:3000"
     networks:
-      - cardline
+      - cardline-data
+      - cardline-edge
 
   web:
     build:
       context: .
       dockerfile: docker/Dockerfile.web
-    image: "${CARDLINE_REGISTRY:-ghcr.io/zhoudashuaibi}/cardline-web:${CARDLINE_TAG:-latest}"
+    image: "${CARDLINE_REGISTRY:-ghcr.io/biubiubiu125}/cardline-web:${CARDLINE_TAG:-latest}"
     container_name: cardline-web
     restart: unless-stopped
     depends_on:
@@ -49,12 +72,17 @@ services:
       # nginx 反代的后端地址（默认对应下面的 server 服务）
       CARDLINE_API_UPSTREAM: "${CARDLINE_API_UPSTREAM:-server:3000}"
     networks:
-      - cardline
+      - cardline-edge
 
 volumes:
-  cardline-data:
-    driver: local
+  cardline-postgres:
+    name: cardline-postgres
 
 networks:
-  cardline:
-    driver: bridge
+  # 只有 cardline-postgres 和 cardline-server。internal 禁止数据库访问外网，也不发布端口。
+  cardline-data:
+    name: cardline-data
+    internal: true
+  # cardline-web 和 cardline-server。网页到不了数据库；后端仍可从这个网络访问外网。
+  cardline-edge:
+    name: cardline-edge

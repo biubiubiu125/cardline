@@ -725,7 +725,7 @@ HTTP 4xx/5xx，body：
 
 ---
 
-## 4. 数据模型（SQLite / Prisma）
+## 4. 数据模型（PostgreSQL / Prisma）
 
 ```prisma
 model AdminUser {

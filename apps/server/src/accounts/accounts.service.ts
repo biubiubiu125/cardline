@@ -19,6 +19,7 @@ import {
   toStringArray,
 } from '../common/utils';
 import { PENDING_TIER, formatTier, isPendingTier, tierFromMailCredits } from '../common/credits';
+import { FORMAT_META, isDeliverFormat, type DeliverFormat } from '../common/error-codes';
 import type { Account } from '@prisma/client';
 
 const SORTABLE_FIELDS = new Set([
@@ -739,9 +740,9 @@ export class AccountsService {
   ): Promise<{ content: string; filename: string; contentType: string }> {
     const normalized = rows.map((row) => this.toNormalizedAccount(row));
     const content = this.convert.buildDeliverContent(format, normalized, now);
-    const ext = format === 'email' ? 'txt' : 'json';
+    const ext = isDeliverFormat(format) ? FORMAT_META[format].ext : format === 'email' ? 'txt' : 'json';
     const contentType =
-      format === 'email'
+      ext === 'txt'
         ? 'text/plain; charset=utf-8'
         : 'application/json; charset=utf-8';
     return { content, filename: `accounts-${format}.${ext}`, contentType };
@@ -755,9 +756,7 @@ export class AccountsService {
     filename?: string;
     limit?: number;
   }) {
-    const format = ['sub2api', 'cpa', 'email'].includes(String(payload?.format))
-      ? String(payload.format)
-      : 'sub2api';
+    const format: DeliverFormat = isDeliverFormat(payload?.format) ? payload.format : 'sub2api';
     const ids = (payload?.ids || []).map((id) => Number(id)).filter((id) => Number.isFinite(id));
     const limit = Math.min(5000, Math.max(1, toPositiveInt(payload?.limit, 2000)));
 
@@ -771,9 +770,7 @@ export class AccountsService {
     const base = await this.buildExportContent(format, rows);
     return {
       ...base,
-      filename: `${safeFilename(payload?.filename || `accounts-${format}`, `accounts-${format}`)}.${
-        format === 'email' ? 'txt' : 'json'
-      }`,
+      filename: `${safeFilename(payload?.filename || `accounts-${format}`, `accounts-${format}`)}.${FORMAT_META[format].ext}`,
     };
   }
 

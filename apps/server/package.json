@@ -2,7 +2,7 @@
   "name": "@cardline/server",
   "version": "1.0.0",
   "private": true,
-  "description": "卡密兑换系统后端 (NestJS + Prisma + SQLite)",
+  "description": "卡密兑换系统后端 (NestJS + Prisma + PostgreSQL)",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",

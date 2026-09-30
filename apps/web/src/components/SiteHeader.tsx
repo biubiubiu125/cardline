@@ -50,6 +50,9 @@ export default function SiteHeader() {
           <NavLink to="/" end className={({ isActive }) => `site-header__link${isActive ? ' is-active' : ''}`}>
             卡密兑换
           </NavLink>
+          <NavLink to="/reclaim" className={({ isActive }) => `site-header__link${isActive ? ' is-active' : ''}`}>
+            401 找回
+          </NavLink>
           <NavLink to="/pickup" className={({ isActive }) => `site-header__link${isActive ? ' is-active' : ''}`}>
             邮箱取件
           </NavLink>

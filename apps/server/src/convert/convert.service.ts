@@ -11,6 +11,7 @@ import {
   looksRefreshToken,
   toDate,
 } from '../common/utils';
+import { convertNormalizedAccount } from './session-formats';
 import type {
   ConvertIssue,
   ConvertResult,
@@ -918,8 +919,9 @@ export class ConvertService {
   /**
    * 给交付文件挑选合适的文档字符串。
    *
-   * 注意：`cpa` 没有「合并成一份」的形态 —— 下游要的是一个个独立的 Codex auth 文件，
-   * 多张卡密的 CPA 由前台打包成 zip（每张卡一个 `.cpa.json`），不走这里。
+   * sub2api 和邮箱 TXT 可以合并成一份。其余格式一个账号一个对象，
+   * 多张卡由前台按 bundle=zip 打包，不在这里并成一份文档。
+   * 旧的 sub2api / CPA / 邮箱 TXT 继续走原实现。
    */
   buildDeliverContent(format: string, accounts: NormalizedAccount[], now = new Date()): string {
     if (format === 'email') {
@@ -928,6 +930,29 @@ export class ConvertService {
     if (format === 'cpa') {
       return `${JSON.stringify(this.toCpaDocument(accounts, now), null, 2)}\n`;
     }
+    const sessionBody = this.sessionFormatBody(format, accounts, now);
+    if (sessionBody !== undefined) {
+      return `${JSON.stringify(sessionBody, null, 2)}\n`;
+    }
     return `${JSON.stringify(this.toSub2ApiDocument(accounts, now), null, 2)}\n`;
+  }
+
+  private sessionFormatBody(
+    format: string,
+    accounts: NormalizedAccount[],
+    now: Date,
+  ): unknown | undefined {
+    const keyByFormat: Record<string, 'cockpit' | 'nineRouter' | 'codexAuthJson' | 'axonHub' | 'codexManager'> = {
+      cockpit: 'cockpit',
+      ninerouter: 'nineRouter',
+      codex: 'codexAuthJson',
+      axonhub: 'axonHub',
+      'codex-manager': 'codexManager',
+    };
+    const key = keyByFormat[format];
+    if (!key) return undefined;
+    const converted = accounts.map((account) => convertNormalizedAccount(account, { now, sourceName: 'cardline' }));
+    const documents = converted.map((item) => item[key]);
+    return documents.length === 1 ? documents[0] : documents;
   }
 }

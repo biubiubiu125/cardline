@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { isDeliverFormat } from '../common/error-codes';
 
 export interface AppSettings {
   siteName: string;
@@ -50,6 +51,7 @@ export class SettingsService {
       ([key, value]) => key in DEFAULT_SETTINGS && value !== undefined && value !== null,
     );
     for (const [key, value] of entries) {
+      if (key === 'defaultFormat' && !isDeliverFormat(value)) continue;
       await this.prisma.setting.upsert({
         where: { key },
         create: { key, value: String(value) },

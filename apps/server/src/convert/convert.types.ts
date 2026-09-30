@@ -109,3 +109,71 @@ export interface ConvertResult {
   items: ConvertedItem[];
   issues: ConvertIssue[];
 }
+
+/** Cockpit Tools。一个账号一份对象。 */
+export interface CockpitAccount {
+  type: 'codex';
+  id_token?: string;
+  access_token: string;
+  refresh_token: string;
+  account_id?: string;
+  last_refresh?: string;
+  email?: string;
+  expired?: string;
+  account_note?: string;
+}
+
+/** Codex CLI auth.json。 */
+export interface CodexAuthDocument {
+  auth_mode: 'chatgpt';
+  OPENAI_API_KEY: null;
+  tokens: {
+    id_token?: string;
+    access_token: string;
+    refresh_token: string;
+    account_id?: string;
+  };
+  last_refresh?: string;
+}
+
+/** AxonHub auth.json。没有 refresh token 时使用参考仓库的占位符。 */
+export interface AxonHubAuthDocument {
+  auth_mode: 'chatgpt';
+  last_refresh?: string;
+  tokens: {
+    access_token: string;
+    refresh_token: string;
+    id_token?: string;
+  };
+  axonhub_refresh_token_placeholder?: boolean;
+  axonhub_note?: string;
+}
+
+/** Codex-Manager。id_token 只保留原值，不补合成 token。 */
+export interface CodexManagerAuthDocument {
+  tokens: {
+    access_token: string;
+    refresh_token: string;
+    id_token: string;
+    account_id?: string;
+    chatgpt_account_id?: string;
+  };
+  meta: Record<string, unknown>;
+}
+
+/** convertSession 的 7 种 JSON。顾客下载的 sub2api / CPA 不走这里。 */
+export interface SessionFormatBundle {
+  sourceName?: string;
+  sourcePath?: string;
+  email?: string;
+  name?: string;
+  expiresAt?: string;
+  accessTokenExpiresAt?: number;
+  cpa: Record<string, unknown>;
+  cockpit: CockpitAccount;
+  nineRouter: Record<string, unknown>;
+  codexAuthJson: CodexAuthDocument;
+  axonHub: AxonHubAuthDocument;
+  codexManager: CodexManagerAuthDocument;
+  sub2apiAccount?: Record<string, unknown>;
+}

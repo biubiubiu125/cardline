@@ -85,7 +85,8 @@ async function main() {
   console.log('[1] 公共元信息');
   const meta = await call('GET', '/public/meta');
   assert(meta.json?.siteName === 'Cardline', '站点信息读取正常', meta.json?.siteName);
-  assert(meta.json?.formats?.length === 3, '交付格式为 3 种', meta.json?.formats?.map((f) => f.value).join(', '));
+  assert(meta.json?.formats?.length === 8, '交付格式为 8 种', meta.json?.formats?.map((f) => f.value).join(', '));
+  assert(meta.json?.formats?.every((item) => item.bundle === 'document' || item.bundle === 'zip'), '每种格式都标明打包方式');
   assert(
     Array.isArray(meta.json?.creditTiers),
     '在售档位由账号派生（无手工档位表）',
@@ -304,6 +305,23 @@ async function main() {
   const noSuccess = await call('POST', '/public/redeem', { cards: ['CARD-AAAAA-BBBBB-CCCCC'], format: 'sub2api' });
   assert(noSuccess.json?.mergedContent === null, '全部失败时不给合并文件');
 
+  for (const format of ['cockpit', 'ninerouter', 'codex', 'axonhub', 'codex-manager']) {
+    const redeem = await call('POST', '/public/redeem', { cards: [first.cardKey], format, limit: 1 });
+    const result = redeem.json?.results?.[0];
+    assert(result?.ok === true, `兑换成功（${format}）`, result?.message);
+    assert(result?.filename === `${first.cardKey}.${format}.json`, `交付文件名（${format}）`, result?.filename);
+    const parsed = JSON.parse(result.content);
+    assert(parsed && typeof parsed === 'object', `${format} 交付是 JSON`);
+    const zipCheck = await call('POST', '/public/redeem', { cards: `${first.cardKey}\n${first.cardKey}`, format });
+    assert(zipCheck.json?.mergedContent === null, `${format} 不返回合并文档`);
+  }
+
+  const reclaimed = await call('POST', '/public/reclaim', { cards: [first.cardKey], format: 'codex' });
+  assert(reclaimed.json?.results?.[0]?.ok === true, '已兑换卡密可以找回', reclaimed.json?.results?.[0]?.message);
+  assert(reclaimed.json?.results?.[0]?.firstRedeem === false, '找回不是首次兑换');
+  assert(reclaimed.json?.results?.[0]?.message === '凭据已刷新', '找回文案');
+  assert(String(reclaimed.json?.results?.[0]?.content || '').includes('synthetic-refreshed-access'), '找回交付使用刷新后的凭据');
+
   // -------------------------------------------------------------------------
   console.log('\n[7] 前台取件：解析');
   const redeemEmail = await call('POST', '/public/redeem', { cards: [first.cardKey], format: 'email' });
@@ -413,7 +431,7 @@ async function main() {
 
   // -------------------------------------------------------------------------
   console.log('\n[10] 后台导出');
-  for (const format of ['sub2api', 'cpa', 'email']) {
+  for (const format of ['sub2api', 'cpa', 'cockpit', 'ninerouter', 'codex', 'axonhub', 'codex-manager', 'email']) {
     const exported = await call('POST', '/admin/accounts/export', {
       format,
       filter: { credits: [CREDITS] },
@@ -423,6 +441,10 @@ async function main() {
     assert(Boolean(exported.headers.get('content-disposition')), `导出 ${format} 带附件文件名`, exported.headers.get('content-disposition'));
     if (format === 'email') {
       assert(exported.text.trim().split('\n').includes(emailLine), '后台邮箱 TXT 与兑换交付的六段内容一致');
+    } else {
+      const parsed = JSON.parse(exported.text);
+      assert(parsed && typeof parsed === 'object', `导出 ${format} 是 JSON`);
+      assert(String(exported.headers.get('content-disposition')).includes(format), `导出文件名包含 ${format}`);
     }
   }
 

@@ -1,15 +1,19 @@
 #!/usr/bin/env node
-/** 临时 SQLite + 脱敏样例 + 模拟上游的接口联调；--serve 保留服务供页面验证。 */
+/** PostgreSQL 隔离 schema + 脱敏样例 + 模拟上游的接口联调；--serve 保留服务供页面验证。 */
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { randomBytes } = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { PrismaClient } = require('@prisma/client');
 
-const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cardline-smoke-'));
+const adminUrl = process.env.DATABASE_URL || '';
+if (!/^postgres(ql)?:\/\//i.test(adminUrl)) {
+  console.error('DATABASE_URL 必须是 PostgreSQL，独立联调不再使用 SQLite');
+  process.exit(1);
+}
+const schemaName = `t_${randomBytes(4).toString('hex')}`;
 Object.assign(process.env, {
   NODE_ENV: 'test',
-  DATABASE_URL: `file:${path.join(directory, 'smoke.db').replaceAll('\\', '/')}`,
   JWT_SECRET: randomBytes(32).toString('hex'),
   ADMIN_USERNAME: 'admin',
   ADMIN_PASSWORD: 'admin123',
@@ -56,13 +60,20 @@ async function close(code = 0) {
     });
   }
   if (app) await app.close();
-  if (path.dirname(directory) !== os.tmpdir()) throw new Error('拒绝清理非临时目录');
-  fs.rmSync(directory, { recursive: true, force: true });
+  const cleanup = new PrismaClient({ datasources: { db: { url: adminUrl } } });
+  await cleanup.$executeRawUnsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+  await cleanup.$disconnect();
   process.exitCode = code;
   process.stdin.pause();
 }
 
 async function main() {
+  const admin = new PrismaClient({ datasources: { db: { url: adminUrl } } });
+  await admin.$executeRawUnsafe(`CREATE SCHEMA "${schemaName}"`);
+  await admin.$disconnect();
+  const scoped = new URL(adminUrl);
+  scoped.searchParams.set('schema', schemaName);
+  process.env.DATABASE_URL = scoped.toString();
   app = await NestFactory.create(AppModule, { logger: false });
   app.setGlobalPrefix('api');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));

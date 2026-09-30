@@ -10,6 +10,22 @@ jobs:
   build-and-test:
     name: 构建与测试
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cardline
+          POSTGRES_PASSWORD: cardline_test
+          POSTGRES_DB: cardline
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cardline -d cardline"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://cardline:cardline_test@localhost:5432/cardline?schema=public
 
     steps:
       - name: 检出代码
@@ -83,13 +99,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/cardline-${{ matrix.name }}
+          images: ghcr.io/biubiubiu125/cardline-${{ matrix.name }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=sha,format=short
+          labels: |
+            org.opencontainers.image.source=https://github.com/biubiubiu125/cardline
 
       - name: 构建 cardline-${{ matrix.name }} 镜像
         uses: docker/build-push-action@v6

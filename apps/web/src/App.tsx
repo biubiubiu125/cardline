@@ -5,6 +5,7 @@ import SiteFooter from './components/SiteFooter';
 import SiteHeader from './components/SiteHeader';
 import PublicLayout from './components/PublicLayout';
 import PickupPage from './pages/PickupPage';
+import ReclaimPage from './pages/ReclaimPage';
 import RedeemPage from './pages/RedeemPage';
 import AccountsPage from './pages/admin/AccountsPage';
 import AdminLayout from './pages/admin/AdminLayout';
@@ -45,6 +46,7 @@ export default function App() {
     <Routes>
       <Route element={<PublicLayout />}>
         <Route path="/" element={<RedeemPage />} />
+        <Route path="/reclaim" element={<ReclaimPage />} />
         <Route path="/pickup" element={<PickupPage />} />
       </Route>
 

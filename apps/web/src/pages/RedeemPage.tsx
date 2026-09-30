@@ -2,7 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { App as AntApp, Button, Input, InputNumber, Select, Tag } from 'antd';
 
 import { downloadBlob, downloadText, errorMessage, getPublicMeta, redeemCards } from '../api/client';
-import type { DeliverFormat, PublicMeta, RedeemResponse, RedeemResult } from '../api/types';
+import {
+  DELIVER_FORMAT_OPTIONS,
+  isZipDeliverFormat,
+  type DeliverFormat,
+  type PublicMeta,
+  type RedeemResponse,
+  type RedeemResult,
+} from '../api/types';
 import SiteFooter from '../components/SiteFooter';
 import StatusDot from '../components/StatusDot';
 import { formatNumber, timestampSuffix } from '../utils/format';
@@ -103,13 +110,14 @@ export default function RedeemPage() {
   const formatOptions = useMemo(() => {
     const formats = meta?.formats ?? [];
     if (formats.length > 0) {
-      return formats.map((item) => ({ value: item.value, label: item.label, ext: item.ext }));
+      return formats.map((item) => ({
+        value: item.value,
+        label: item.label,
+        ext: item.ext,
+        bundle: item.bundle,
+      }));
     }
-    return [
-      { value: 'sub2api' as DeliverFormat, label: 'sub2api', ext: 'json' },
-      { value: 'cpa' as DeliverFormat, label: 'CPA', ext: 'json' },
-      { value: 'email' as DeliverFormat, label: '邮箱 TXT', ext: 'txt' },
-    ];
+    return DELIVER_FORMAT_OPTIONS;
   }, [meta]);
 
   const formatLabel = useMemo(
@@ -124,8 +132,8 @@ export default function RedeemPage() {
   const totalInRun = response?.summary.total ?? 0;
 
   const hasResults = results.length > 0;
-  /** CPA 走 zip 打包（每张卡一个文件），其余格式走合并成一份文档 */
-  const isZipBatch = response?.format === 'cpa';
+  /** zip 格式按卡密打包；document 格式合并成一份。以接口返回的 bundle 为准。 */
+  const isZipBatch = isZipDeliverFormat(response?.format, formatOptions);
   const hasBatch = isZipBatch
     ? results.some((item) => item.ok && item.content)
     : Boolean(response?.mergedContent);
@@ -170,17 +178,15 @@ export default function RedeemPage() {
       return;
     }
 
-    // CPA 没有「合并成一份」的形态：下游要的是一个个独立的 Codex auth 文件，
-    // 所以打包成 zip，每张卡密一个 .cpa.json
-    if (response.format === 'cpa') {
+    if (isZipBatch) {
       const succeeded = results.filter((item) => item.ok && item.content);
       const blob = buildZipBlob(
         succeeded.map((item) => ({
-          name: item.filename ?? `${item.card}.cpa.json`,
+          name: item.filename ?? `${item.card}.${response.format}.json`,
           content: item.content ?? '',
         })),
       );
-      downloadBlob(blob, `cardline-cpa-${timestampSuffix()}.zip`);
+      downloadBlob(blob, `cardline-${response.format}-${timestampSuffix()}.zip`);
       return;
     }
 

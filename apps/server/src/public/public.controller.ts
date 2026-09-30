@@ -22,6 +22,16 @@ export class PublicController {
     });
   }
 
+  @Post('reclaim')
+  reclaim(@Body() body: Record<string, unknown>, @Req() request: Request) {
+    return this.service.reclaim({
+      cards: body?.cards,
+      format: typeof body?.format === 'string' ? body.format : undefined,
+      ip: clientIp(request),
+      userAgent: request.headers['user-agent'],
+    });
+  }
+
   @Post('pickup/resolve')
   resolve(@Body() body: Record<string, unknown>) {
     return this.service.resolvePickup({

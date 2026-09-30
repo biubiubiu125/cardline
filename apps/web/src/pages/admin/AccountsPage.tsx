@@ -48,8 +48,9 @@ import {
   updateAccount,
   MAIL_CREDITS_PER_TIER,
 } from '../../api/client';
-import type {
-  AccountListQuery,
+import {
+  DELIVER_FORMAT_OPTIONS,
+  type AccountListQuery,
   AccountRow,
   AccountSortField,
   AccountSummary,
@@ -108,11 +109,7 @@ const SORT_PRESETS: Array<{ value: string; label: string; field: AccountSortFiel
   { value: 'id-ascend', label: '编号↑', field: 'id', order: 'ascend' },
 ];
 
-const EXPORT_ITEMS = [
-  { key: 'sub2api', label: 'sub2api' },
-  { key: 'cpa', label: 'CPA' },
-  { key: 'email', label: '邮箱TXT' },
-];
+const EXPORT_ITEMS = DELIVER_FORMAT_OPTIONS.map((item) => ({ key: item.value, label: item.label }));
 
 interface AccountFilters {
   credits: number[];

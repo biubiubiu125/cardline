@@ -5,6 +5,7 @@
  * 每个函数对应 `docs/API.md` 中的一个端点，路径 / 方法 / 字段名与契约完全一致。
  */
 
+import { DELIVER_FORMAT_OPTIONS } from './types';
 import type {
   AccountListQuery,
   AccountListResponse,
@@ -41,6 +42,7 @@ import type {
   PickupResolveRequest,
   PickupResolveResponse,
   PublicMeta,
+  ReclaimRequest,
   RedeemRequest,
   RedeemResponse,
   RefreshStatusRequest,
@@ -339,6 +341,11 @@ export function redeemCards(payload: RedeemRequest): Promise<RedeemResponse> {
   return request<RedeemResponse>('/public/redeem', { method: 'POST', body: payload });
 }
 
+/** `POST /api/public/reclaim` */
+export function reclaimCards(payload: ReclaimRequest): Promise<RedeemResponse> {
+  return request<RedeemResponse>('/public/reclaim', { method: 'POST', body: payload });
+}
+
 /** `POST /api/public/pickup/resolve` */
 export function resolvePickup(payload: PickupResolveRequest): Promise<PickupResolveResponse> {
   return request<PickupResolveResponse>('/public/pickup/resolve', {
@@ -472,7 +479,7 @@ export function getAccountMailbox(id: number, query: MailboxQuery = {}): Promise
 
 /** `POST /api/admin/accounts/export`（返回附件） */
 export function exportAccountsBlob(payload: ExportAccountsRequest): Promise<DownloadPayload> {
-  const ext = payload.format === 'email' ? 'txt' : 'json';
+  const ext = DELIVER_FORMAT_OPTIONS.find((item) => item.value === payload.format)?.ext ?? 'json';
   const base = payload.filename?.trim() || `accounts-${payload.format}`;
   const fallback = /\.[a-z0-9]+$/i.test(base) ? base : `${base}.${ext}`;
   return requestDownload('/admin/accounts/export', { method: 'POST', body: payload }, fallback);

@@ -3,16 +3,12 @@ import { App as AntApp, Button, Card, Col, Form, Input, InputNumber, Row, Select
 import { SaveOutlined } from '@ant-design/icons';
 
 import { changePassword, errorMessage, getSettings, updateSettings } from '../../api/client';
-import type { DeliverFormat, Settings } from '../../api/types';
+import { DELIVER_FORMAT_OPTIONS, type Settings } from '../../api/types';
 import { useAuth } from '../../hooks/useAuth';
 
 const { TextArea } = Input;
 
-const FORMAT_OPTIONS: Array<{ value: DeliverFormat; label: string }> = [
-  { value: 'sub2api', label: 'sub2api' },
-  { value: 'cpa', label: 'CPA' },
-  { value: 'email', label: '邮箱 TXT' },
-];
+const FORMAT_OPTIONS = DELIVER_FORMAT_OPTIONS.map((item) => ({ value: item.value, label: item.label }));
 
 interface PasswordFormValues {
   oldPassword: string;

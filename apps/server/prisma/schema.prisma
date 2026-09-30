@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -173,7 +173,7 @@ model Setting {
   updatedAt DateTime @updatedAt
 }
 
-// 服务启动时执行的 SQLite 升级记录。
+// 服务启动时执行的 PostgreSQL 升级记录。已有 SQLite 文件不会自动迁入。
 model SchemaMigration {
   version   Int      @id
   appliedAt DateTime @default(now())

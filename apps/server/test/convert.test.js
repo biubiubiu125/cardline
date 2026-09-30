@@ -569,3 +569,60 @@ test('CPA 交付：来源没有 extra 时不写这个键（保持产物形态不
   assert.equal(cpa.type, 'codex');
   assert.equal('extra' in cpa, false, '裸 Codex auth 导入后不应凭空多出 extra');
 });
+
+test('新增五种交付格式走 convertSession，旧三种仍走原实现', () => {
+  const { DELIVER_FORMATS, FORMAT_META } = require(path.join(__dirname, '..', 'dist', 'common', 'error-codes.js'));
+  const { convertSession } = require(path.join(__dirname, '..', 'dist', 'convert', 'session-formats.js'));
+  assert.equal(DELIVER_FORMATS.length, 8);
+  assert.equal(FORMAT_META.sub2api.bundle, 'document');
+  assert.equal(FORMAT_META.email.bundle, 'document');
+  for (const name of ['cpa', 'cockpit', 'ninerouter', 'codex', 'axonhub', 'codex-manager']) {
+    assert.equal(FORMAT_META[name].bundle, 'zip', name);
+  }
+
+  const account = {
+    name: 'user@outlook.com',
+    email: 'user@outlook.com',
+    accountId: 'acct-1',
+    planType: 'plus',
+    accessToken: accessToken(),
+    refreshToken: 'rt.1.REFRESH-TOKEN-VALUE-0123456789',
+    rawSource: 'sub2api',
+  };
+  const cockpit = JSON.parse(service.buildDeliverContent('cockpit', [account]));
+  assert.equal(cockpit.access_token, account.accessToken);
+  assert.equal(cockpit.refresh_token, account.refreshToken);
+  assert.equal(cockpit.account_id, 'acct-1');
+  const nine = JSON.parse(service.buildDeliverContent('ninerouter', [account]));
+  assert.equal(nine.provider, 'codex');
+  assert.equal(nine.accessToken, account.accessToken);
+  const codex = JSON.parse(service.buildDeliverContent('codex', [account]));
+  assert.equal(codex.auth_mode, 'chatgpt');
+  assert.equal(codex.tokens.access_token, account.accessToken);
+  const manager = JSON.parse(service.buildDeliverContent('codex-manager', [account]));
+  assert.equal(manager.tokens.refresh_token, account.refreshToken);
+  assert.equal(manager.tokens.id_token, '');
+  const missing = { ...account, refreshToken: undefined };
+  const axon = JSON.parse(service.buildDeliverContent('axonhub', [missing]));
+  assert.equal(axon.tokens.refresh_token, '__missing_refresh_token__');
+  assert.equal(axon.axonhub_refresh_token_placeholder, true);
+  const batch = JSON.parse(service.buildDeliverContent('cockpit', [account, account]));
+  assert.equal(Array.isArray(batch), true);
+  assert.equal(batch.length, 2);
+
+  const direct = convertSession({
+    accessToken: account.accessToken,
+    refreshToken: account.refreshToken,
+    email: account.email,
+    account: { id: 'acct-1', planType: 'plus' },
+  }, { now: new Date('2026-01-01T00:00:00.000Z'), sourceName: 'unit' });
+  assert.equal(direct.cockpit.type, 'codex');
+  assert.equal(direct.sub2apiAccount.platform, 'openai');
+  assert.equal(direct.codexManager.tokens.id_token, '');
+
+  const oldSub = JSON.parse(service.buildDeliverContent('sub2api', [account]));
+  assert.equal(oldSub.type, 'sub2api-data');
+  const oldCpa = JSON.parse(service.buildDeliverContent('cpa', [account]));
+  assert.equal(oldCpa.type, 'codex');
+  assert.equal(service.buildDeliverContent('email', [account]), '\n');
+});

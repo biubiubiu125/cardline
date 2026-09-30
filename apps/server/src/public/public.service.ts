@@ -1,9 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConvertService, readSub2ApiPassthrough } from '../convert/convert.service';
+import { TokenRefreshClient, type TokenRefresher } from '../convert/token-refresh';
 import { MailboxService } from '../mailbox/mailbox.service';
 import { SettingsService } from '../settings/settings.service';
-import { FORMAT_META } from '../common/error-codes';
+import { DELIVER_FORMATS, FORMAT_META, isDeliverFormat } from '../common/error-codes';
 import { isPendingTier, tierFromMailCredits } from '../common/credits';
 import {
   bizError,
@@ -30,6 +31,22 @@ function deliverFilename(cardKey: string, format: string): string {
   const ext = meta?.ext || 'json';
   const stem = safeFilename(cardKey, 'card');
   return format === 'email' ? `${stem}.${ext}` : `${stem}.${format}.${ext}`;
+}
+
+function resolveDeliverFormat(requested: unknown, fallback: unknown): string {
+  if (isDeliverFormat(requested)) return requested;
+  if (isDeliverFormat(fallback)) return fallback;
+  return 'sub2api';
+}
+
+function mergedDeliverContent(
+  convert: ConvertService,
+  format: string,
+  delivered: NormalizedAccount[],
+): string | null {
+  if (!delivered.length) return null;
+  if (isDeliverFormat(format) && FORMAT_META[format].bundle === 'zip') return null;
+  return convert.buildDeliverContent(format, delivered);
 }
 
 export interface ResolvedRecord {
@@ -67,12 +84,17 @@ type AccountWithMailbox = Account & { mailbox: any };
 export class RedeemService {
   private readonly logger = new Logger(RedeemService.name);
 
+  private readonly refresher: TokenRefresher;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly convert: ConvertService,
     private readonly mailbox: MailboxService,
     private readonly settings: SettingsService,
-  ) {}
+    @Optional() @Inject(TokenRefreshClient) refresher?: TokenRefreshClient,
+  ) {
+    this.refresher = refresher ?? new TokenRefreshClient(mailbox);
+  }
 
   // -------------------------------------------------------------------------
   // 前台元信息
@@ -128,11 +150,12 @@ export class RedeemService {
       siteName: settings.siteName,
       siteSubtitle: settings.siteSubtitle,
       announcement: settings.announcement,
-      formats: (['sub2api', 'cpa', 'email'] as const).map((value) => ({
+      formats: DELIVER_FORMATS.map((value) => ({
         value,
         label: FORMAT_META[value].label,
         ext: FORMAT_META[value].ext,
         hint: FORMAT_META[value].hint,
+        bundle: FORMAT_META[value].bundle,
       })),
       /** 在售档位（= 账号实际额度，由邮箱取件命中关键字自动定档，非手工维护） */
       creditTiers: byCredits.filter((item) => item.available > 0).map((item) => item.credits),
@@ -165,9 +188,7 @@ export class RedeemService {
     userAgent?: string;
   }) {
     const settings = await this.settings.getAll();
-    const format = ['sub2api', 'cpa', 'email'].includes(String(payload?.format))
-      ? String(payload.format)
-      : settings.defaultFormat || 'sub2api';
+    const format = resolveDeliverFormat(payload?.format, settings.defaultFormat);
 
     const raw = Array.isArray(payload?.cards) ? payload.cards : [payload?.cards];
     let cards = [
@@ -224,12 +245,8 @@ export class RedeemService {
     return {
       format,
       results,
-      // 合并下载：sub2api / email 把所有成功账号并成一份文档。
-      // CPA 没有合并形态（下游要一个个独立的 Codex auth 文件），前台改为打包 zip。
-      mergedContent:
-        format === 'cpa' || delivered.length === 0
-          ? null
-          : this.convert.buildDeliverContent(format, delivered),
+      // document 格式合并成一份；zip 格式由前台按卡打包，这里不并文件。
+      mergedContent: mergedDeliverContent(this.convert, format, delivered),
       summary: {
         total: cards.length,
         success: successCount,
@@ -238,6 +255,266 @@ export class RedeemService {
         accounts: accountCount,
       },
     };
+  }
+
+  /**
+   * 凭据找回：只接受已兑换卡密和交付格式。
+   * 先刷新到内存，再一次性写库；写库失败只重试写库，不再拿旧 refresh token 请求第二次。
+   */
+  async reclaim(payload: { cards?: unknown; format?: string; ip?: string; userAgent?: string }) {
+    const settings = await this.settings.getAll();
+    const format = resolveDeliverFormat(payload?.format, settings.defaultFormat);
+    const raw = Array.isArray(payload?.cards) ? payload.cards : [payload?.cards];
+    let cards = [
+      ...new Set(
+        raw
+          .flatMap((item) => splitTokens(item))
+          .map((item) => normalizeCardKey(item))
+          .filter(Boolean),
+      ),
+    ];
+    if (cards.length > MAX_CARDS) {
+      this.logger.warn(`单次找回卡密数量超限（${cards.length}），已截断为 ${MAX_CARDS}`);
+      cards = cards.slice(0, MAX_CARDS);
+    }
+    if (!cards.length) {
+      return {
+        format,
+        results: [],
+        mergedContent: null,
+        summary: { total: 0, success: 0, failed: 0, credits: 0, accounts: 0 },
+      };
+    }
+
+    const results: Array<Record<string, unknown>> = [];
+    const delivered: NormalizedAccount[] = [];
+    let successCount = 0;
+    let failedCount = 0;
+    let creditsSum = 0;
+    let accountCount = 0;
+    for (const cardKey of cards) {
+      const { record, normalized } = await this.reclaimOne(cardKey, format, payload?.ip, payload?.userAgent);
+      results.push(record);
+      if (record.ok) {
+        successCount += 1;
+        creditsSum += Number(record.credits) || 0;
+        accountCount += Number(record.accountCount) || 0;
+        delivered.push(...normalized);
+      } else {
+        failedCount += 1;
+      }
+    }
+    return {
+      format,
+      results,
+      mergedContent: mergedDeliverContent(this.convert, format, delivered),
+      summary: {
+        total: cards.length,
+        success: successCount,
+        failed: failedCount,
+        credits: creditsSum,
+        accounts: accountCount,
+      },
+    };
+  }
+
+  private async reclaimOne(
+    cardKey: string,
+    format: string,
+    ip?: string,
+    userAgent?: string,
+  ): Promise<{ record: Record<string, unknown>; normalized: NormalizedAccount[] }> {
+    const fail = (code: string, message: string) => ({
+      normalized: [] as NormalizedAccount[],
+      record: {
+        card: cardKey,
+        ok: false,
+        code,
+        message,
+        credits: null,
+        accountCount: 0,
+        firstRedeem: false,
+        filename: null,
+        content: null,
+        accounts: [],
+      },
+    });
+
+    const account = await this.prisma.account.findUnique({
+      where: { cardKey },
+      include: { mailbox: true },
+    });
+    if (!account) return this.finishReclaim(cardKey, null, 0, format, fail('CARD_INVALID', '卡密不存在'), ip, userAgent);
+    if (account.cardDisabled) {
+      return this.finishReclaim(cardKey, account.id, account.credits, format, fail('CARD_DISABLED', '卡密已停用'), ip, userAgent);
+    }
+    if (!account.redeemedByCard || account.redeemStatus === 'unredeemed') {
+      return this.finishReclaim(
+        cardKey,
+        account.id,
+        account.credits,
+        format,
+        fail('CARD_NOT_REDEEMED', '该卡密尚未兑换，不能找回'),
+        ip,
+        userAgent,
+      );
+    }
+    if (account.redeemedByCard !== cardKey) {
+      return this.finishReclaim(
+        cardKey,
+        account.id,
+        account.credits,
+        format,
+        fail('CARD_ALLOCATED', '卡密归属不一致'),
+        ip,
+        userAgent,
+      );
+    }
+    if (account.banStatus === 'banned' || account.banStatus === 'invalid') {
+      return this.finishReclaim(
+        cardKey,
+        account.id,
+        account.credits,
+        format,
+        fail('NO_STOCK', '交付账号已封禁或凭据失效，请联系管理员'),
+        ip,
+        userAgent,
+      );
+    }
+
+    const accounts = await this.prisma.account.findMany({
+      where: { redeemedByCard: cardKey },
+      include: { mailbox: true },
+      orderBy: { id: 'asc' },
+    });
+    if (!accounts.length || accounts.some((item) => item.cardDisabled || ['banned', 'invalid'].includes(item.banStatus))) {
+      return this.finishReclaim(
+        cardKey,
+        account.id,
+        account.credits,
+        format,
+        fail('NO_STOCK', '交付账号已停用、封禁或凭据失效，请联系管理员'),
+        ip,
+        userAgent,
+      );
+    }
+    if (accounts.some((item) => !item.refreshToken)) {
+      return this.finishReclaim(
+        cardKey,
+        account.id,
+        account.credits,
+        format,
+        fail('REFRESH_MISSING', '该卡缺少可刷新凭据'),
+        ip,
+        userAgent,
+      );
+    }
+
+    const pending: Array<{ id: number; accessToken: string; refreshToken: string; idToken?: string; expiresAt?: Date }> = [];
+    for (const item of accounts) {
+      const refreshed = await this.refresher.refresh(String(item.refreshToken));
+      if (!refreshed.ok || !refreshed.credentials?.accessToken || !refreshed.credentials.refreshToken) {
+        return this.finishReclaim(
+          cardKey,
+          account.id,
+          account.credits,
+          format,
+          fail('REFRESH_FAILED', '凭据刷新失败，请稍后重试或联系管理员'),
+          ip,
+          userAgent,
+        );
+      }
+      pending.push({
+        id: item.id,
+        accessToken: refreshed.credentials.accessToken,
+        refreshToken: refreshed.credentials.refreshToken,
+        idToken: refreshed.credentials.idToken,
+        expiresAt: refreshed.credentials.expiresAt,
+      });
+    }
+
+    await this.writeRefreshedCredentials(pending);
+    const fresh = await this.prisma.account.findMany({
+      where: { redeemedByCard: cardKey },
+      include: { mailbox: true },
+      orderBy: { id: 'asc' },
+    });
+    const normalized = fresh.map((item) => this.toNormalized(item));
+    const content = this.convert.buildDeliverContent(format, normalized);
+    const primary = fresh.find((item) => item.cardKey === cardKey) || account;
+    return this.finishReclaim(cardKey, primary.id, primary.credits, format, {
+      normalized,
+      record: {
+        card: cardKey,
+        ok: true,
+        code: 'OK',
+        message: '凭据已刷新',
+        credits: primary.credits,
+        accountCount: fresh.length,
+        redeemedAt: primary.redeemedAt ? primary.redeemedAt.toISOString() : null,
+        firstRedeem: false,
+        filename: deliverFilename(cardKey, format),
+        content,
+        accounts: fresh.map((item) => ({
+          id: item.id,
+          name: item.name,
+          credits: item.credits,
+          planType: item.planType,
+          email: item.email,
+        })),
+      },
+    }, ip, userAgent);
+  }
+
+  private async finishReclaim(
+    cardKey: string,
+    accountId: number | null,
+    credits: number,
+    format: string,
+    result: { record: Record<string, unknown>; normalized: NormalizedAccount[] },
+    ip?: string,
+    userAgent?: string,
+  ) {
+    await this.log(
+      cardKey,
+      accountId,
+      credits,
+      `reclaim:${format}`,
+      Boolean(result.record.ok),
+      String(result.record.code),
+      ip,
+      userAgent,
+    );
+    return result;
+  }
+
+  /** 刷新请求已经完成。这里只重试数据库写入，不能再次调用刷新。 */
+  private async writeRefreshedCredentials(
+    updates: Array<{ id: number; accessToken: string; refreshToken: string; idToken?: string; expiresAt?: Date }>,
+  ): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          for (const item of updates) {
+            await tx.account.update({
+              where: { id: item.id },
+              data: {
+                accessToken: item.accessToken,
+                refreshToken: item.refreshToken,
+                ...(item.idToken ? { idToken: item.idToken } : {}),
+                ...(item.expiresAt ? { expiresAt: item.expiresAt } : {}),
+              },
+            });
+          }
+        });
+        return;
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`找回凭据写库失败，第 ${attempt} 次，不再请求刷新`);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('找回凭据写库失败');
   }
 
   private async redeemOne(
@@ -302,21 +579,23 @@ export class RedeemService {
         await tx.account.update({ where: { id: account.id }, data: { redeemedByCard: cardKey } });
       }
       if (isFirstRedeem && limit > 1) {
-        const extra = await tx.account.findMany({
-          where: {
-            credits: account.credits,
-            redeemStatus: 'unredeemed',
-            redeemedByCard: null,
-            banStatus: { notIn: ['banned', 'invalid'] },
-            cardDisabled: false,
-          },
-          select: { id: true },
-          orderBy: { id: 'asc' },
-          take: limit - 1,
-        });
-        if (extra.length) {
+        // PostgreSQL 读已提交下，普通查询会让两张卡同时看中同一批库存。
+        // SKIP LOCKED 让并发兑换各自锁住不同的行，避免重复交付。
+        const extra = await tx.$queryRaw<Array<{ id: number }>>`
+          SELECT id FROM "Account"
+          WHERE credits = ${account.credits}
+            AND "redeemStatus" = 'unredeemed'
+            AND "redeemedByCard" IS NULL
+            AND "banStatus" NOT IN ('banned', 'invalid')
+            AND "cardDisabled" = false
+          ORDER BY id ASC
+          LIMIT ${limit - 1}
+          FOR UPDATE SKIP LOCKED
+        `;
+        const extraIds = extra.map((item) => Number(item.id));
+        if (extraIds.length) {
           await tx.account.updateMany({
-            where: { id: { in: extra.map((item) => item.id) } },
+            where: { id: { in: extraIds } },
             data: { redeemStatus: 'redeemed', redeemedByCard: cardKey, redeemedAt, redeemCount: { increment: 1 } },
           });
         }

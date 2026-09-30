@@ -2,19 +2,20 @@
 
 输入卡密 → 校验 → 按所选格式生成交付文件；配套邮箱取件与后台账号管理。
 
-- **前台卡密兑换页** `/` — 粘贴卡密、选择交付格式（`sub2api` / `CPA` / `邮箱 TXT`）、生成并下载交付文件
+- **前台卡密兑换页** `/` — 粘贴卡密、选择 8 种交付格式之一、生成并下载交付文件
+- **前台凭据找回页** `/reclaim` — 只提交已兑换卡密和格式，刷新原账号后重新交付
 - **前台邮箱取件页** `/pickup` — 输入有效卡密 / `邮箱----密码----clientid----refresh_token` 凭据行，或上传 txt / sub2api JSON 文件取件，自动提取验证码、额度、封禁状态
 - **后台管理系统** `/admin` — 账号列表（额度、封禁、兑换状态筛选与排序）、批量导入切割、卡密生成、复制卡密（单张 / 批量）、一键取件弹窗
 - **共享顶部导航**：默认首页为「卡密兑换」，点击「邮箱取件」切换内容，导航栏保持不变
 - **额度全自动**：账号额度不手填，只认邮箱取件命中的额度关键字（档位 = 命中 credits ÷ 25）；未命中的账号为「待定档」，不进兑换池
 
-技术栈：**NestJS + Prisma + SQLite** / **React 18 + Ant Design 5 + Ant Design Pro 组件 + Vite**
+技术栈：**NestJS + Prisma + PostgreSQL** / **React 18 + Ant Design 5 + Ant Design Pro 组件 + Vite**
 
 ---
 
 ## 一、Docker 部署
 
-镜像由 **GitHub Actions 构建并推送到 GHCR**：`ghcr.io/zhoudashuaibi/cardline-server` 和 `ghcr.io/zhoudashuaibi/cardline-web`。推送代码到 GitHub 即自动发布（默认分支打 `latest`，同时打分支名、tag、`sha-xxxxxxx` 标签）。
+镜像由 **GitHub Actions 构建并推送到 GHCR**：`ghcr.io/biubiubiu125/cardline-server` 和 `ghcr.io/biubiubiu125/cardline-web`。推送代码到 GitHub 即自动发布（默认分支打 `latest`，同时打分支名、tag、`sha-xxxxxxx` 标签）。
 
 ### 方式 A：服务器只拉镜像运行（推荐）
 
@@ -25,7 +26,7 @@ cp .env.docker.example .env
 
 # 2. 登录 GHCR（镜像若已设为 public 可跳过这步）
 #    PAT 需要勾选 read:packages 权限
-echo <你的PAT> | docker login ghcr.io -u zhoudashuaibi --password-stdin
+echo <你的PAT> | docker login ghcr.io -u biubiubiu125 --password-stdin
 
 # 3. 拉取并启动（--no-build 确保只拉取、不在服务器上重新构建）
 docker compose pull
@@ -64,34 +65,43 @@ npm run docker:rebuild   # 本机无缓存重建
 
 ### 部署说明
 
-- **架构**：`web` 容器（nginx）托管前端静态文件并把 `/api` 反向代理到 `server` 容器（NestJS，3000 端口）。对外只暴露一个端口，无跨域问题。
-- **数据持久化**：SQLite 数据库位于命名卷 `cardline-data` 的 `/data/cardline.db`，容器重建不丢数据。
+- **容器名**：`cardline-postgres`、`cardline-server`、`cardline-web`。数据卷名是 `cardline-postgres`。
+- **网络**：`cardline-data` 是内部网络，只有数据库和后端。`cardline-edge` 只有后端和网页。网页到不了数据库，数据库端口不发布，数据库也不能访问外网。对外只暴露网页端口。
+- **时区**：三个容器默认 `Asia/Shanghai`。
+- **架构**：`cardline-web` 托管前端并把 `/api` 反代到 `cardline-server`。后端仍可经 `cardline-edge` 访问邮箱和刷新接口。
+- **数据持久化**：只用 PostgreSQL 16。数据在命名卷 `cardline-postgres`，容器重建不丢数据。不支持 SQLite 或 MySQL。
 - **表结构自动初始化**：`server` 容器启动时执行 `apps/server/scripts/bootstrap-db.js`，按 `SchemaMigration` 版本在事务中建表和补齐旧字段；失败时回滚并阻止启动，无需运行 Prisma CLI。
 - **后端地址可配**：nginx 通过 `CARDLINE_API_UPSTREAM`（默认 `server:3000`）反代，改成 `host.docker.internal:3000` 之类即可指向外部后端。
-- **备份**：`docker run --rm -v cardline-data:/data -v %cd%:/backup alpine tar czf /backup/cardline-backup.tar.gz -C /data .`
+- **备份**：用 `pg_dump` 导出 PostgreSQL。不要把旧 SQLite 文件自动迁进新库。
 - **改端口**：`.env` 里设 `WEB_PORT`（默认 `3010`，例如 `WEB_PORT=80` 走标准 HTTP 端口）。
-- **换镜像来源**：`.env` 里设 `CARDLINE_REGISTRY`（默认 `ghcr.io/zhoudashuaibi`）与 `CARDLINE_TAG`（默认 `latest`，生产建议固定成 `sha-xxxxxxx`）。
+- **换镜像来源**：`.env` 里设 `CARDLINE_REGISTRY`（默认 `ghcr.io/biubiubiu125`）与 `CARDLINE_TAG`（默认 `latest`，生产建议固定成 `sha-xxxxxxx`）。
 - **直接暴露 API**：取消 `docker-compose.yml` 中 `server.ports` 的注释。
 
 ### 镜像体积
 
 | 镜像 | 大小 | 说明 |
 | --- | --- | --- |
-| `ghcr.io/zhoudashuaibi/cardline-server` | ~646 MB | node:22-bookworm-slim + NestJS + Prisma 引擎 |
-| `ghcr.io/zhoudashuaibi/cardline-web` | ~75 MB | nginx:alpine + 静态资源 |
+| `ghcr.io/biubiubiu125/cardline-server` | node:22-bookworm-slim + NestJS + Prisma 引擎 |
+| `ghcr.io/biubiubiu125/cardline-web` | nginx:alpine + 静态资源 |
 
-### 单容器运行（不用 compose）
+### 不用 compose 时也要保持隔离
 
-先在当前 shell 设置 `JWT_SECRET` 和 `ADMIN_PASSWORD`，满足上述生产要求。
+不要把数据库端口公布到宿主机，也不要让网页容器进入 `cardline-data`。
 
 ```bash
-docker build -f docker/Dockerfile.server -t cardline-server .
-docker run -d --name cardline-server -p 3000:3000 \
-  -e JWT_SECRET="$JWT_SECRET" -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
-  -v cardline-data:/data cardline-server
-
-docker build -f docker/Dockerfile.web -t cardline-web .
-docker run -d --name cardline-web -p 3010:80 --link cardline-server:server cardline-web
+docker network create --internal cardline-data
+docker network create cardline-edge
+docker volume create cardline-postgres
+docker run -d --name cardline-postgres --network cardline-data \
+  -e TZ=Asia/Shanghai -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB \
+  -v cardline-postgres:/var/lib/postgresql/data postgres:16 \
+  postgres -c timezone=Asia/Shanghai -c log_timezone=Asia/Shanghai
+docker run -d --name cardline-server --network cardline-data \
+  -e TZ=Asia/Shanghai -e DATABASE_URL -e JWT_SECRET -e ADMIN_PASSWORD \
+  ghcr.io/biubiubiu125/cardline-server:latest
+docker network connect cardline-edge cardline-server
+docker run -d --name cardline-web --network cardline-edge -p 3010:80 \
+  -e TZ=Asia/Shanghai ghcr.io/biubiubiu125/cardline-web:latest
 ```
 
 ---
@@ -107,7 +117,7 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 
 - 开发模式可用 `admin/admin123`；未设置有效 JWT_SECRET 时使用进程随机密钥，重启后需要重新登录。生产环境不接受此配置。
 - 前端 http://localhost:5173/ ，`/admin` 进后台，`/api` 由 Vite 代理到后端
-- 数据库文件 `apps/server/prisma/cardline.db`，**首次启动自动建表并写入种子数据**，无需手动迁移
+- 本地 `DATABASE_URL` 指向 PostgreSQL。**首次启动自动建表并写入种子数据**，无需手动迁移
 - 想用 Prisma 的迁移/可视化：`npm run db:push`、`npm run db:studio`
 
 ### 全部脚本
@@ -120,7 +130,7 @@ npm run dev          # 同时启动后端(3000) + 前端(5173)
 | `npm run db:push` | Prisma 同步表结构 |
 | `npm run db:studio` | Prisma Studio 可视化数据库 |
 | `npm run test:convert` | 格式转换回归测试（先编译后端） |
-| `npm run test:security` | 临时 SQLite 安全、迁移和并发兑换回归（先编译后端） |
+| `npm run test:security` | PostgreSQL 隔离 schema 上的安全、迁移和并发兑换回归（先编译后端） |
 | `npm run test:smoke:local` | 自动启动隔离数据库服务，使用脱敏样例和模拟上游执行接口联调 |
 | `npm run test:smoke:local -- --serve` | 联调成功后保留隔离服务及已构建的前端供页面验证，输入 stop 关闭 |
 | `npm run test:smoke` | 对指定后端写入数据的联调；只用于独立测试数据库，可能访问外部取件服务 |
@@ -294,7 +304,7 @@ A：此入口检查并刷新过期的 OpenAI 凭据，兑换状态由实际交�
 A：`.env` 是 compose 的变量来源，改完执行 `docker compose up -d`（必要时 `--force-recreate`）。
 
 **Q：`docker compose pull` 报 `not found`？**
-A：说明要去拉的那个名字在仓库里不存在。跑 `docker compose config | findstr image` 确认 compose 实际解析出的完整镜像名（应形如 `ghcr.io/zhoudashuaibi/cardline-server:latest`）。如果名字不带仓库前缀，Docker 会默认去 `docker.io/library/` 找，必然 `not found`。
+A：说明要去拉的那个名字在仓库里不存在。跑 `docker compose config | findstr image` 确认 compose 实际解析出的完整镜像名（应形如 `ghcr.io/biubiubiu125/cardline-server:latest`）。如果名字不带仓库前缀，Docker 会默认去 `docker.io/library/` 找，必然 `not found`。
 
 **Q：`docker compose pull` 报 `denied` / `unauthorized`？**
 A：GHCR 上的包默认是私有的。要么 `docker login ghcr.io -u <用户名> -p <带 read:packages 的 PAT>`，要么到 GitHub → 你的 Packages → 该包 → Package settings → Change visibility 改成 public。
@@ -303,4 +313,4 @@ A：GHCR 上的包默认是私有的。要么 `docker login ghcr.io -u <用户�
 A：看 workflow 的 `push` 参数。`push: false` 只在 runner 上构建验证，job 结束镜像就随 runner 销毁，不会发布到任何仓库；必须 `push: true` 且先 `docker/login-action` 登录，镜像才会有地方可拉。
 
 **Q：想换数据库？**
-A：改 `apps/server/prisma/schema.prisma` 的 `datasource`（如 `mysql`），配置 `DATABASE_URL`，然后 `npm run db:push`。注意：SQLite 专用的自举建表语句只在 SQLite 下生效，换库后请用 Prisma 迁移。
+A：生产只用 PostgreSQL。`DATABASE_URL` 必须是 `postgresql://`，启动时会拒绝其他数据库。
