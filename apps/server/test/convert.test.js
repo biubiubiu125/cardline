@@ -606,9 +606,11 @@ test('新增五种交付格式走 convertSession，旧三种仍走原实现', ()
   const axon = JSON.parse(service.buildDeliverContent('axonhub', [missing]));
   assert.equal(axon.tokens.refresh_token, '__missing_refresh_token__');
   assert.equal(axon.axonhub_refresh_token_placeholder, true);
-  const batch = JSON.parse(service.buildDeliverContent('cockpit', [account, account]));
-  assert.equal(Array.isArray(batch), true);
-  assert.equal(batch.length, 2);
+  assert.throws(
+    () => service.buildDeliverContent('cockpit', [account, account]),
+    /一个账号/,
+    'cockpit 等格式不能把多个账号拼成一个 JSON 数组',
+  );
 
   const direct = convertSession({
     accessToken: account.accessToken,
