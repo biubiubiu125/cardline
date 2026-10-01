@@ -439,12 +439,18 @@ async function main() {
     }, { allowFailure: true });
     assert(exported.status === 200, `导出 ${format} 成功`, `HTTP ${exported.status}, ${exported.text.length} 字节`);
     assert(Boolean(exported.headers.get('content-disposition')), `导出 ${format} 带附件文件名`, exported.headers.get('content-disposition'));
+    const disposition = String(exported.headers.get('content-disposition') || '');
+    const contentType = String(exported.headers.get('content-type') || '');
     if (format === 'email') {
       assert(exported.text.trim().split('\n').includes(emailLine), '后台邮箱 TXT 与兑换交付的六段内容一致');
+    } else if (contentType.includes('zip') || exported.text.startsWith('PK')) {
+      assert(exported.text.startsWith('PK'), `导出 ${format} 是 zip`);
+      assert(disposition.includes('.zip'), `导出 ${format} 文件名是 zip`, disposition);
+      assert(disposition.includes(format), `导出文件名包含 ${format}`, disposition);
     } else {
       const parsed = JSON.parse(exported.text);
       assert(parsed && typeof parsed === 'object', `导出 ${format} 是 JSON`);
-      assert(String(exported.headers.get('content-disposition')).includes(format), `导出文件名包含 ${format}`);
+      assert(disposition.includes(format), `导出文件名包含 ${format}`, disposition);
     }
   }
 
