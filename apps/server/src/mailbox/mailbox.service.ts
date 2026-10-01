@@ -10,6 +10,7 @@ import {
   toDate,
 } from '../common/utils';
 import { MailAnalyzerService } from './mail-analyzer.service';
+import { expiresAtFromJwt } from '../common/jwt-expiry';
 import type {
   MailMessage,
   MailboxCredential,
@@ -387,15 +388,13 @@ export class MailboxService {
 
     const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
     if (!response.ok) {
-      const code = String(json.error || `HTTP ${response.status}`);
-      const description = String(json.error_description || '')
-        .replace(/\s+/g, ' ')
-        .slice(0, 160);
+      const code = openAiErrorCode(json, response.status);
+      const description = openAiErrorDescription(json);
       return {
         ok: false,
         error: `刷新失败（${code}）：${description || 'refresh_token 可能已失效'}`,
-        invalidCredential:
-          INVALID_CREDENTIAL_CODES.includes(code) || response.status === 400 || response.status === 401,
+        // 只有 refresh token 本身作废才标失效。400/401、invalid_client 是请求或客户端配置错误。
+        invalidCredential: code === 'invalid_grant',
       };
     }
 
@@ -409,7 +408,10 @@ export class MailboxService {
       accessToken,
       refreshToken: String(json.refresh_token || '') || undefined,
       idToken: String(json.id_token || '') || undefined,
-      expiresAt: Number.isFinite(expiresIn) ? new Date(Date.now() + expiresIn * 1000) : undefined,
+      expiresAt:
+        Number.isFinite(expiresIn) && expiresIn > 0
+          ? new Date(Date.now() + expiresIn * 1000)
+          : expiresAtFromJwt(accessToken) || undefined,
       invalidCredential: false,
     };
   }
@@ -417,4 +419,21 @@ export class MailboxService {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function openAiErrorCode(json: Record<string, unknown>, status: number): string {
+  const raw = json.error;
+  if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  if (isObject(raw)) {
+    const code = raw.code ?? raw.error;
+    if (typeof code === 'string' && code.trim()) return code.trim();
+  }
+  return `HTTP ${status}`;
+}
+
+function openAiErrorDescription(json: Record<string, unknown>): string {
+  const raw = json.error;
+  const nested = isObject(raw) && typeof raw.message === 'string' ? raw.message : '';
+  const description = typeof json.error_description === 'string' ? json.error_description : nested;
+  return description.replace(/\s+/g, ' ').trim().slice(0, 160);
 }

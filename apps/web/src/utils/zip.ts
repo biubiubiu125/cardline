@@ -37,3 +37,35 @@ export function buildZipBlob(entries: ZipEntry[]): Blob {
 
   return new Blob([zipSync(files, { level: 6 })], { type: 'application/zip' });
 }
+
+/** 把单卡 content，或多账号 files，展开成 zip 条目。 */
+export function deliverDownloadEntries(
+  items: Array<{
+    card: string;
+    filename?: string | null;
+    content?: string | null;
+    files?: Array<{ filename?: string | null; content?: string | null }> | null;
+  }>,
+  format: string,
+): ZipEntry[] {
+  const entries: ZipEntry[] = [];
+  for (const item of items) {
+    if (item.files?.length) {
+      item.files.forEach((file, index) => {
+        if (!file.content) return;
+        entries.push({
+          name: file.filename?.trim() || `${item.card}-${index + 1}.${format}.json`,
+          content: file.content,
+        });
+      });
+      continue;
+    }
+    if (item.content) {
+      entries.push({
+        name: item.filename?.trim() || `${item.card}.${format}.json`,
+        content: item.content,
+      });
+    }
+  }
+  return entries;
+}

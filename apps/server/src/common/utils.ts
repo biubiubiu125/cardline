@@ -12,6 +12,20 @@ export function bizError(code: ErrorCode, message: string, status = 400, details
   throw error;
 }
 
+/**
+ * 取转发链最后一跳。Nginx 会把实际对端追在客户端传来的值后面，
+ * 第一跳可以伪造，不能写进兑换日志。
+ */
+export function clientAddress(headers: { [key: string]: unknown } | null | undefined, fallback = ''): string {
+  const forwarded = headers?.['x-forwarded-for'];
+  const raw = Array.isArray(forwarded) ? forwarded.join(',') : forwarded;
+  if (typeof raw === 'string' && raw.trim()) {
+    const parts = raw.split(',').map((item) => item.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return fallback || '';
+}
+
 export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }

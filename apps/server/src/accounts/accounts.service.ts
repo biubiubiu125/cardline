@@ -20,7 +20,16 @@ import {
 } from '../common/utils';
 import { PENDING_TIER, formatTier, isPendingTier, tierFromMailCredits } from '../common/credits';
 import { FORMAT_META, isDeliverFormat, type DeliverFormat } from '../common/error-codes';
+import { withReclaimLock } from '../public/reclaim-lock';
+import { serializeStagedCredential, stagedExpiresAt, stagedForAccount } from '../public/staged-credential';
+import { expiresAtFromJwt } from '../common/jwt-expiry';
+import { zipStored } from '../common/zip-store';
 import type { Account } from '@prisma/client';
+
+function credentialExpiry(refreshed: { expiresAt?: Date | null; accessToken?: string | null }): Date | null {
+  if (refreshed.expiresAt instanceof Date && !Number.isNaN(refreshed.expiresAt.getTime())) return refreshed.expiresAt;
+  return expiresAtFromJwt(refreshed.accessToken);
+}
 
 const SORTABLE_FIELDS = new Set([
   'id',
@@ -591,7 +600,7 @@ export class AccountsService {
   // -------------------------------------------------------------------------
 
   async update(id: number, patch: Record<string, unknown>) {
-    await this.getById(id, false);
+    const current = await this.getById(id, false);
     const data: Prisma.AccountUpdateManyMutationInput = {};
 
     if (patch.remark !== undefined) data.remark = patch.remark === null ? null : String(patch.remark);
@@ -618,6 +627,7 @@ export class AccountsService {
       }
       data.redeemStatus = status;
       data.redeemedAt = status === 'redeemed' ? new Date() : null;
+      if (status === 'redeemed' && !current.redeemedByCard) data.redeemedByCard = current.cardKey;
     }
 
     const changed = await this.prisma.account.updateMany({
@@ -710,20 +720,20 @@ export class AccountsService {
           }
         : undefined;
 
+    const staged = stagedForAccount(account);
+    const expiresAt = staged ? stagedExpiresAt(staged.expiresAt) : account.expiresAt;
     return {
       name: account.name,
       email: account.email || undefined,
       planType: account.planType || undefined,
       accountId: account.accountId || undefined,
       userId: account.userId || undefined,
-      accessToken: account.accessToken,
-      refreshToken: account.refreshToken || undefined,
-      idToken: account.idToken || undefined,
+      accessToken: staged?.accessToken || account.accessToken,
+      refreshToken: staged?.refreshToken || account.refreshToken || undefined,
+      idToken: staged?.idToken || account.idToken || undefined,
       sessionToken: account.sessionToken || undefined,
-      expiresAt: account.expiresAt ? account.expiresAt.toISOString() : undefined,
-      accessTokenExpiresAt: account.expiresAt
-        ? Math.trunc(account.expiresAt.getTime() / 1000)
-        : undefined,
+      expiresAt: expiresAt ? expiresAt.toISOString() : undefined,
+      accessTokenExpiresAt: expiresAt ? Math.trunc(expiresAt.getTime() / 1000) : undefined,
       rawSource: (account.rawSource as 'sub2api' | 'cpa') || 'sub2api',
       raw,
       mailbox,
@@ -748,6 +758,42 @@ export class AccountsService {
     return { content, filename: `accounts-${format}.${ext}`, contentType };
   }
 
+  /** 导出前把仍匹配的暂存凭据写成当前凭据。同卡已有未完成标记时，这份凭据也保持不轮换。 */
+  private async persistStagedExports(rows: Array<Account & { mailbox?: any }>): Promise<void> {
+    const owners = [
+      ...new Set(rows.filter((row) => stagedForAccount(row)).map((row) => row.redeemedByCard || row.cardKey)),
+    ];
+    for (const owner of owners) {
+      try {
+        await withReclaimLock(this.prisma, owner, async () => {
+          const selected = new Set(rows.map((row) => row.id));
+          const current = await this.prisma.account.findMany({
+            where: { OR: [{ redeemedByCard: owner }, { cardKey: owner }] },
+          });
+          const held = current.some((item) => item.refreshHeld);
+          for (const item of current) {
+            if (!selected.has(item.id)) continue;
+            const staged = stagedForAccount(item);
+            if (!staged || !item.refreshToken) continue;
+            await this.prisma.account.updateMany({
+              where: { id: item.id, refreshToken: item.refreshToken },
+              data: {
+                accessToken: staged.accessToken,
+                refreshToken: staged.refreshToken,
+                idToken: staged.idToken,
+                expiresAt: stagedExpiresAt(staged.expiresAt),
+                stagedCredential: null,
+                ...(held ? { refreshHeld: true } : {}),
+              },
+            });
+          }
+        });
+      } catch {
+        this.logger.warn('导出时提交暂存凭据失败，文件仍按暂存凭据生成');
+      }
+    }
+  }
+
   /** 后台导出：按筛选条件或指定 id 导出 */
   async exportAccounts(payload: {
     format?: string;
@@ -766,8 +812,34 @@ export class AccountsService {
       orderBy: { id: 'asc' },
       take: limit,
     });
+    await this.persistStagedExports(rows);
+    const fresh = rows.length
+      ? await this.prisma.account.findMany({
+          where: { id: { in: rows.map((row) => row.id) } },
+          include: { mailbox: true },
+          orderBy: { id: 'asc' },
+        })
+      : rows;
 
-    const base = await this.buildExportContent(format, rows);
+    const sessionFiles = new Set(['cockpit', 'ninerouter', 'codex', 'axonhub', 'codex-manager']);
+    if (sessionFiles.has(format) && fresh.length > 1) {
+      const normalized = fresh.map((row) => this.toNormalizedAccount(row));
+      const stem = safeFilename(payload?.filename || `accounts-${format}`, `accounts-${format}`);
+      return {
+        content: zipStored(
+          normalized.map((account, index) => {
+            const label = safeFilename(account.email || account.name || String(index + 1), String(index + 1));
+            return {
+              name: `${stem}-${index + 1}-${label}.${format}.json`,
+              content: this.convert.buildDeliverContent(format, [account]),
+            };
+          }),
+        ),
+        filename: `${stem}.zip`,
+        contentType: 'application/zip',
+      };
+    }
+    const base = await this.buildExportContent(format, fresh);
     return {
       ...base,
       filename: `${safeFilename(payload?.filename || `accounts-${format}`, `accounts-${format}`)}.${FORMAT_META[format].ext}`,
@@ -918,11 +990,60 @@ export class AccountsService {
   /** 凭据健康检查不推断交易行为，兑换状态只由交付或管理员操作改变。 */
   private async refreshRedeem(
     account: Account & { mailbox?: any },
-  ): Promise<{ redeemStatus: string; redeemedAt: string | null; error: string | null }> {
-    const result = (error: string | null = null) => ({
+  ): Promise<{
+    redeemStatus: string;
+    redeemedAt: string | null;
+    error: string | null;
+    unsavedCredential?: { accessToken: string; refreshToken: string; idToken: string | null; expiresAt: string | null } | null;
+  }> {
+    return withReclaimLock(this.prisma, account.redeemedByCard || account.cardKey, () => this.refreshRedeemLocked(account.id));
+  }
+
+  private async refreshRedeemLocked(
+    accountId: number,
+  ): Promise<{
+    redeemStatus: string;
+    redeemedAt: string | null;
+    error: string | null;
+    unsavedCredential?: { accessToken: string; refreshToken: string; idToken: string | null; expiresAt: string | null } | null;
+  }> {
+    let account = await this.prisma.account.findUnique({ where: { id: accountId } });
+    if (!account) return { redeemStatus: 'unredeemed', redeemedAt: null, error: '账号不存在' };
+    const staged = stagedForAccount(account);
+    if (staged && account.refreshToken) {
+      const owner = account.redeemedByCard || account.cardKey;
+      const held = await this.prisma.account.count({
+        where: { redeemedByCard: owner, refreshHeld: true },
+      });
+      const applied = await this.prisma.account.updateMany({
+        where: { id: account.id, refreshToken: account.refreshToken },
+        data: {
+          accessToken: staged.accessToken,
+          refreshToken: staged.refreshToken,
+          idToken: staged.idToken,
+          expiresAt: stagedExpiresAt(staged.expiresAt),
+          stagedCredential: null,
+          ...(held > 0 ? { refreshHeld: true } : {}),
+        },
+      });
+      if (!applied.count) {
+        return {
+          redeemStatus: account.redeemStatus,
+          redeemedAt: account.redeemedAt?.toISOString() || null,
+          error: '凭据已被其他操作更新，未写入',
+        };
+      }
+      account = await this.prisma.account.findUnique({ where: { id: accountId } });
+      if (!account) return { redeemStatus: 'unredeemed', redeemedAt: null, error: '账号不存在' };
+    }
+    const result = (
+      error: string | null = null,
+      unsavedCredential: { accessToken: string; refreshToken: string; idToken: string | null; expiresAt: string | null } | null = null,
+    ) => ({
       redeemStatus: account.redeemStatus,
       redeemedAt: account.redeemedAt?.toISOString() || null,
       error,
+      unsavedCredential,
     });
     let expiresAt = account.expiresAt?.getTime();
     if (!Number.isFinite(expiresAt)) {
@@ -938,28 +1059,78 @@ export class AccountsService {
 
     // MailCredential.refreshToken 属于微软 OAuth，绝不能发送给 OpenAI。
     if (!account.refreshToken) return result('缺少 OpenAI refresh_token，无法刷新过期凭据');
-    const refreshed = await this.mailbox.refreshOpenAiToken(account.refreshToken);
+    const previousRefreshToken = account.refreshToken;
+    const refreshed = await this.mailbox.refreshOpenAiToken(previousRefreshToken);
     if (!refreshed.ok) {
       if (refreshed.invalidCredential) {
         await this.prisma.account.updateMany({
-          where: { id: account.id, refreshToken: account.refreshToken, banStatus: { not: 'banned' } },
+          where: { id: account.id, refreshToken: previousRefreshToken, banStatus: { not: 'banned' } },
           data: { banStatus: 'invalid', banReason: refreshed.error, banCheckedAt: new Date() },
         });
       }
       return result(refreshed.error || '刷新失败');
     }
 
-    // 条件写回避免覆盖并发更新；不写 banStatus / redeemStatus 等其他流程管理的字段。
-    await this.prisma.account.updateMany({
-      where: { id: account.id, refreshToken: account.refreshToken },
-      data: {
-        accessToken: refreshed.accessToken!,
-        refreshToken: refreshed.refreshToken || account.refreshToken,
-        idToken: refreshed.idToken || account.idToken,
-        expiresAt: refreshed.expiresAt || account.expiresAt,
-      },
+    // 条件写回避免覆盖并发更新。写库抛错也要暂存，否则下次还会拿旧 refresh token 去刷新。
+    const nextRefreshToken = refreshed.refreshToken || previousRefreshToken;
+    const nextAccessToken = refreshed.accessToken!;
+    const nextIdToken = refreshed.idToken || account.idToken || null;
+    const nextExpiry = credentialExpiry(refreshed);
+    let persisted = false;
+    let stagedAside = false;
+    for (let attempt = 0; attempt < 2 && !persisted && !stagedAside; attempt += 1) {
+      try {
+        const changed = await this.prisma.account.updateMany({
+          where: { id: account.id, refreshToken: previousRefreshToken },
+          data: {
+            accessToken: nextAccessToken,
+            refreshToken: nextRefreshToken,
+            idToken: nextIdToken,
+            expiresAt: nextExpiry,
+            stagedCredential: null,
+          },
+        });
+        if (changed.count) {
+          persisted = true;
+          break;
+        }
+      } catch {
+        // 写成当前凭据失败时改为暂存，不能把异常直接抛出。
+      }
+      try {
+        const current = await this.prisma.account.findUnique({ where: { id: account.id } });
+        if (current?.refreshToken === nextRefreshToken && current.accessToken === nextAccessToken) {
+          persisted = true;
+          break;
+        }
+        if (current?.refreshToken !== previousRefreshToken) {
+          return result('凭据已被其他操作更新，未写入');
+        }
+        const saved = await this.prisma.account.updateMany({
+          where: { id: account.id, refreshToken: previousRefreshToken },
+          data: {
+            stagedCredential: serializeStagedCredential({
+              accessToken: nextAccessToken,
+              refreshToken: nextRefreshToken,
+              idToken: nextIdToken,
+              expiresAt: nextExpiry,
+              previousRefreshToken,
+            }),
+          },
+        });
+        if (saved.count) stagedAside = true;
+      } catch {
+        // 暂存也失败就再试一次，仍然不请求 OpenAI。
+      }
+    }
+    if (persisted) return result();
+    if (stagedAside) return result('凭据已刷新但没有写成当前凭据，已暂存，请再检查一次');
+    return result('凭据已刷新，但没有写入数据库。请立即保存本次结果，旧刷新凭据可能已经失效', {
+      accessToken: nextAccessToken,
+      refreshToken: nextRefreshToken,
+      idToken: nextIdToken,
+      expiresAt: nextExpiry ? nextExpiry.toISOString() : null,
     });
-    return result();
   }
 
   /**
@@ -1067,6 +1238,7 @@ export class AccountsService {
           const redeem = await this.refreshRedeem(account);
           entry.redeemStatus = redeem.redeemStatus;
           entry.redeemedAt = redeem.redeemedAt;
+          if (redeem.unsavedCredential) entry.unsavedCredential = redeem.unsavedCredential;
           if (redeem.error) {
             errors.push(redeem.error);
             redeemFailed = true;

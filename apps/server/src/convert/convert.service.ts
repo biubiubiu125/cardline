@@ -919,9 +919,9 @@ export class ConvertService {
   /**
    * 给交付文件挑选合适的文档字符串。
    *
-   * sub2api 和邮箱 TXT 可以合并成一份。其余格式一个账号一个对象，
-   * 多张卡由前台按 bundle=zip 打包，不在这里并成一份文档。
-   * 旧的 sub2api / CPA / 邮箱 TXT 继续走原实现。
+   * sub2api 和邮箱 TXT 可以合并成一份。CPA 多账号仍是数组。
+   * cockpit / ninerouter / codex / axonhub / codex-manager 一次只输出一个账号对象，
+   * 多账号由调用方拆成独立文件。
    */
   buildDeliverContent(format: string, accounts: NormalizedAccount[], now = new Date()): string {
     if (format === 'email') {
@@ -953,6 +953,9 @@ export class ConvertService {
     if (!key) return undefined;
     const converted = accounts.map((account) => convertNormalizedAccount(account, { now, sourceName: 'cardline' }));
     const documents = converted.map((item) => item[key]);
-    return documents.length === 1 ? documents[0] : documents;
+    if (documents.length !== 1) {
+      throw new Error('该格式一次只能输出一个账号，多账号请拆成独立文件');
+    }
+    return documents[0];
   }
 }

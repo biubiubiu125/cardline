@@ -62,6 +62,8 @@ export const SCHEMA_STATEMENTS: string[] = [
     "copyCount" INTEGER NOT NULL DEFAULT 0,
     "batchId" TEXT,
     "remark" TEXT,
+    "stagedCredential" TEXT,
+    "refreshHeld" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP NOT NULL,
     CONSTRAINT "Account_batchId_fkey" FOREIGN KEY ("batchId") REFERENCES "Batch" ("batchId") ON DELETE SET NULL ON UPDATE CASCADE

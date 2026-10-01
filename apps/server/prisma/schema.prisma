@@ -66,6 +66,8 @@ model Account {
   redeemedAt   DateTime?
   redeemCount  Int       @default(0)
   copyCount    Int       @default(0)
+  stagedCredential String?
+  refreshHeld      Boolean   @default(false)
 
   batchId String?
   remark  String?

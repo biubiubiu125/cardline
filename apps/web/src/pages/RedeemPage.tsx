@@ -5,6 +5,7 @@ import { downloadBlob, downloadText, errorMessage, getPublicMeta, redeemCards } 
 import {
   DELIVER_FORMAT_OPTIONS,
   isZipDeliverFormat,
+  selectDeliverFormat,
   type DeliverFormat,
   type PublicMeta,
   type RedeemResponse,
@@ -13,7 +14,7 @@ import {
 import SiteFooter from '../components/SiteFooter';
 import StatusDot from '../components/StatusDot';
 import { formatNumber, timestampSuffix } from '../utils/format';
-import { buildZipBlob } from '../utils/zip';
+import { buildZipBlob, deliverDownloadEntries } from '../utils/zip';
 import './RedeemPage.css';
 
 const { TextArea } = Input;
@@ -90,8 +91,9 @@ export default function RedeemPage() {
         if (cancelled) return;
         setMeta(data);
         const formats = Array.isArray(data.formats) ? data.formats : [];
-        const preferred = formats.find((item) => item.value === DEFAULT_FORMAT) ?? formats[0];
-        if (preferred) setFormat(preferred.value);
+        setFormat(selectDeliverFormat(formats, data.defaultFormat));
+        const configuredLimit = Math.min(20, Math.max(1, Math.trunc(Number(data.redeemLimitPerCard) || 1)));
+        setLimit(configuredLimit);
       })
       .catch(() => {
         if (!cancelled) setMeta(null);
@@ -135,7 +137,7 @@ export default function RedeemPage() {
   /** zip 格式按卡密打包；document 格式合并成一份。以接口返回的 bundle 为准。 */
   const isZipBatch = isZipDeliverFormat(response?.format, formatOptions);
   const hasBatch = isZipBatch
-    ? results.some((item) => item.ok && item.content)
+    ? deliverDownloadEntries(results.filter((item) => item.ok), response?.format ?? format).length > 0
     : Boolean(response?.mergedContent);
 
   const queueCapacity = useMemo(() => {
@@ -147,16 +149,16 @@ export default function RedeemPage() {
   const handleSubmit = useCallback(async () => {
     if (cards.length === 0 || submitting) return;
 
-    const submitted = cards.slice(0, MAX_CARDS);
     if (cards.length > MAX_CARDS) {
-      void message.warning(`单次最多提交 ${MAX_CARDS} 张卡密，已截取前 ${MAX_CARDS} 张`);
+      void message.error(`单次最多提交 ${MAX_CARDS} 张卡密`);
+      return;
     }
 
     setSubmitting(true);
     try {
-      const data = await redeemCards({ cards: submitted, format, limit });
+      const data = await redeemCards({ cards, format, limit });
       setResponse(data);
-      setStatusText(`已选择 ${formatLabel} · 共 ${submitted.length} 张`);
+      setStatusText(`已选择 ${formatLabel} · 共 ${cards.length} 张`);
       void message.success(
         `兑换完成：成功 ${data.summary.success} 张，失败 ${data.summary.failed} 张`,
       );
@@ -169,8 +171,13 @@ export default function RedeemPage() {
   }, [cards, format, formatLabel, limit, message, submitting]);
 
   const downloadSingle = useCallback((result: RedeemResult) => {
-    downloadText(result.content ?? '', result.filename ?? `${result.card}.txt`);
-  }, []);
+    const entries = deliverDownloadEntries([result], response?.format ?? format);
+    if (entries.length > 1) {
+      downloadBlob(buildZipBlob(entries), `${result.card}.zip`);
+      return;
+    }
+    if (entries.length === 1) downloadText(entries[0].content, entries[0].name);
+  }, [format, response?.format]);
 
   const downloadAll = useCallback(() => {
     if (!response || !hasBatch) {
@@ -179,14 +186,12 @@ export default function RedeemPage() {
     }
 
     if (isZipBatch) {
-      const succeeded = results.filter((item) => item.ok && item.content);
-      const blob = buildZipBlob(
-        succeeded.map((item) => ({
-          name: item.filename ?? `${item.card}.${response.format}.json`,
-          content: item.content ?? '',
-        })),
+      const entries = deliverDownloadEntries(
+        results.filter((item) => item.ok),
+        response.format,
       );
-      downloadBlob(blob, `cardline-${response.format}-${timestampSuffix()}.zip`);
+      if (!entries.length) return;
+      downloadBlob(buildZipBlob(entries), `cardline-${response.format}-${timestampSuffix()}.zip`);
       return;
     }
 
@@ -267,8 +272,8 @@ export default function RedeemPage() {
                 </div>
                 <div className="stat-cell">
                   <div className="stat-cell__label">账号锁定</div>
-                  <div className="stat-cell__value">1:1</div>
-                  <div className="stat-cell__caption">首次兑换后固定</div>
+                  <div className="stat-cell__value">{limit > 1 ? `1:${limit}` : '1:1'}</div>
+                  <div className="stat-cell__caption">{limit > 1 ? '按后台上限交付' : '首次兑换后固定'}</div>
                 </div>
                 <div className="stat-cell">
                   <div className="stat-cell__label">交付格式</div>
@@ -341,7 +346,7 @@ export default function RedeemPage() {
                   <InputNumber
                     style={{ width: '100%' }}
                     min={1}
-                    max={meta?.redeemLimitPerCard ?? 1}
+                    max={Math.min(20, Math.max(1, Math.trunc(Number(meta?.redeemLimitPerCard) || 1)))}
                     precision={0}
                     value={limit}
                     onChange={(value) => setLimit(typeof value === 'number' ? value : 1)}
@@ -404,7 +409,7 @@ export default function RedeemPage() {
                         <Tag color={item.ok ? 'success' : 'error'} style={{ margin: 0 }}>
                           {item.ok ? '成功' : '失败'}
                         </Tag>
-                        {item.ok && item.content ? (
+                        {item.ok && deliverDownloadEntries([item], response?.format ?? format).length > 0 ? (
                           <Button
                             type="link"
                             size="small"

@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'NO_STOCK'
   | 'REFRESH_MISSING'
   | 'REFRESH_FAILED'
+  | 'PERSIST_FAILED'
   | 'PICKUP_FAILED'
   | 'UPSTREAM_ERROR'
   | 'CONFLICT'

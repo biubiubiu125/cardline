@@ -30,7 +30,7 @@ HTTP 4xx/5xx，body：
 }
 ```
 
-`code` 取值：`BAD_INPUT` | `UNAUTHORIZED` | `NOT_FOUND` | `CARD_INVALID` | `CARD_DISABLED` | `CARD_ALLOCATED` | `CREDITS_PENDING` | `NO_STOCK` | `CONFLICT` | `PICKUP_FAILED` | `UPSTREAM_ERROR` | `INTERNAL`
+`code` 取值：`BAD_INPUT` | `UNAUTHORIZED` | `NOT_FOUND` | `CARD_INVALID` | `CARD_NOT_REDEEMED` | `CARD_DISABLED` | `CARD_ALLOCATED` | `CREDITS_PENDING` | `NO_STOCK` | `REFRESH_MISSING` | `REFRESH_FAILED` | `PERSIST_FAILED` | `CONFLICT` | `PICKUP_FAILED` | `UPSTREAM_ERROR` | `INTERNAL`
 
 ### 鉴权
 
@@ -46,7 +46,7 @@ HTTP 4xx/5xx，body：
 | `creditStatus` | `pending` 待定档 / `ready` 已定档（= `credits > 0`） |
 | `banStatus` | `unknown` 未知 / `normal` 正常 / `banned` 已封禁 / `invalid` 凭据失效 |
 | `redeemStatus` | `unredeemed` 未兑换 / `redeemed` 已兑换 |
-| `deliverFormat` | `sub2api` / `cpa` / `email` |
+| `deliverFormat` | `sub2api` / `cpa` / `cockpit` / `ninerouter` / `codex` / `axonhub` / `codex-manager` / `email` |
 | `pickupStatus` | `ok` / `failed` |
 | `importSource` | `paste` / `upload` |
 
@@ -63,6 +63,7 @@ HTTP 4xx/5xx，body：
   "siteName": "Cardline",
   "siteSubtitle": "SECURE DELIVERY",
   "redeemLimitPerCard": 1,
+  "defaultFormat": "sub2api",
   "formats": [
     { "value": "sub2api", "label": "sub2api", "ext": "json", "hint": "sub2api 导入 JSON" },
     { "value": "cpa", "label": "CPA", "ext": "json", "hint": "Codex CPA auth JSON" },
@@ -98,7 +99,7 @@ HTTP 4xx/5xx，body：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `cards` | string[] | 是 | 卡密数组，服务端会按换行/空格/逗号/分号二次切分，去重，最多 500 条 |
+| `cards` | string[] | 是 | 卡密数组，服务端会按换行/空格/逗号/分号二次切分并去重。超过 500 张直接拒绝，不再截断 |
 | `format` | `deliverFormat` | 是 | 交付格式 |
 | `limit` | number | 否 | 默认使用后台 `redeemLimitPerCard`（初始值 1），请求值不得超过该配置，配置最大 20；仅影响首次兑换 |
 
@@ -163,12 +164,14 @@ HTTP 4xx/5xx，body：
 | 格式 | 合并文件结构 |
 | --- | --- |
 | `sub2api` | `{ type: "sub2api-data", version, exported_at, proxies: [], accounts: [所有账号] }` |
-| `email` | 所有卡密的四段或六段凭据行直接拼接，不带任何分隔标题；每个账号独立判断是否附带账密 / 2FA |
+| `email` | 所有卡密的四段或六段凭据行直接拼接，不带任何分隔标题；每个账号独立判断是否附带账密 / 2FA。成功交付不附带 OpenAI JSON |
 | `cpa` | **恒为 `null`** —— CPA 没有「合并成一份」的形态，下游要的是一个个独立的 Codex auth 文件；前台改为把各卡 `content` 打包成 zip（每张卡一个 `<卡密>.cpa.json`） |
 
 合并文件可被本服务原样再导入（`POST /api/admin/accounts/import`）。
 
 > `cpa` 格式下多账号导出仍走 `content`（单账号是对象、多账号是数组），与单卡下载产物完全一致。
+>
+> `cockpit` / `ninerouter` / `codex` / `axonhub` / `codex-manager` 一张卡有多个账号时，`content` 为 `null`，`files` 里每个账号一个 JSON 对象。单账号仍用 `content`。后台导出多个账号时直接返回 zip。
 
 #### 交付产物里的 `extra`（含 2FA）
 
@@ -192,6 +195,38 @@ HTTP 4xx/5xx，body：
 第五段读取原始 JSON 的 `notes` 内部 `gpt.password`，第六段读取 `two_factor.secret`。支持 `notes` 为 JSON 字符串或对象，也兼容单数 `note`；不要求该备注同时包含 `mailbox`。这两项至少一项为非空字符串时输出六段，缺失的一项留空；两项都没有时保持四段。仅有 `extra.two_factor_enabled` 等标记不视为提供了密钥。密码中的特殊字符按原文保留。
 
 该规则适用于单卡 / 批量兑换及后台账号导出，已有账号从 `rawJson` 读取，无需数据库迁移或重新导入。`POST /api/public/pickup/export` 的 `kind: "line"` 仍只输出四段邮箱取件凭据。
+
+### 1.2.1 `POST /api/public/reclaim`
+
+已兑换卡密找回新凭据。只接受卡密和交付格式，不接受密码、JSON、邮箱或令牌。单次最多 500 张，超过直接拒绝。
+
+请求：
+
+```json
+{
+  "cards": ["CARD-XXXXX-XXXXX-XXXXX"],
+  "format": "sub2api"
+}
+```
+
+响应形状与兑换相同。成功时 `firstRedeem` 为 `false`，`code` 为 `OK`。邮箱格式成功时只返回四段或六段 TXT。写库失败或只写进一部分时，失败卡自己的文件会在邮箱行后面另附 sub2api JSON，避免新凭据只留在内存里。同一次批量里已经成功的卡仍只保留四段或六段，合并文件不会带上它们的 OpenAI 凭据。
+
+失败 `code`：
+
+| code | 含义 |
+| --- | --- |
+| `CARD_INVALID` | 卡密不存在 |
+| `CARD_DISABLED` | 卡密已停用 |
+| `CARD_NOT_REDEEMED` | 尚未兑换，不能找回 |
+| `CARD_ALLOCATED` | 卡密归属不一致 |
+| `NO_STOCK` | 交付账号已停用、封禁或凭据失效 |
+| `REFRESH_MISSING` | 缺少可刷新凭据 |
+| `REFRESH_FAILED` | 刷新失败。若同一张卡已经写入一部分新凭据，`content` 仍返回已写入的文件 |
+| `PERSIST_FAILED` | 新凭据没有可靠落库。响应里仍带本次文件，必须立刻保存。已暂存时，再次找回不会拿旧凭据重新刷新 |
+
+同一张卡的找回、兑换重导出和后台刷新共用一把锁。找回正在向服务商换凭据时，兑换重导出会等待，不会把即将失效的旧凭据当作成功文件返回。
+
+成功找回会先保持持有标记。只有响应完整写出后才清除；连接中断或网关超时导致响应没送出时标记保留，再次找回不会重新轮换，并且不再继续刷新后续卡。组包异常时，失败文件仍包含这张卡上已经持有、本次没有轮换的账号。
 
 ### 1.3 `POST /api/public/pickup/resolve`
 
@@ -593,7 +628,7 @@ HTTP 4xx/5xx，body：
 
 - **封禁状态**：邮箱取件 → 扫描最新 10 封邮件的 `subject + bodyPreview + body`，命中封禁关键词（`account deactivated` / `suspended` / `disabled` / `permanently deleted` / `账户已停用` / `账号已被封禁` 等）→ `banned`；取件成功且未命中 → `normal`；OAuth 换 token 失败（`invalid_grant` / `unauthorized_client`）→ `invalid`（凭据失效，非封禁）；网络错误 → 保持原状态并返回 `error`。
 - **额度定档**：同一次取件结果里命中额度关键字（`we've added N credits` / `添加了 N 额度` / `N クレジット` / `N créditos` …）→ 写回 `Account.credits = floor(N ÷ 25)`，计入 `hit`；取件成功但没命中 → 保持原值（导入时为 `0` = 待定档），计入 `pending`；取件失败 → `failed`。**未命中的账号不会被清空已有档位。**
-- **凭据检查（兼容参数 `redeem`）**：读取 `Account.expiresAt`，缺失时读取 `access_token` 的 JWT `exp`；仅在确认过期时使用账号自己的 OpenAI `refresh_token` 刷新，不使用微软邮箱 token。成功只条件更新 OAuth 字段，不将正常轮换推断为已兑换，也不覆盖封禁状态。凭据失效时标记 `invalid`（保留已有 `banned`）并计入 `failed`；有效期未知或缺少刷新凭据返回原因。汇总状态与返回 `items` 均使用刷新后的数据库记录。
+- **凭据检查（兼容参数 `redeem`）**：读取 `Account.expiresAt`，缺失时读取 `access_token` 的 JWT `exp`；仅在确认过期时使用账号自己的 OpenAI `refresh_token` 刷新，不使用微软邮箱 token。成功只条件更新 OAuth 字段，不将正常轮换推断为已兑换，也不覆盖封禁状态。只有 OpenAI 返回 `invalid_grant` 才把账号标为 `invalid`（保留已有 `banned`）并计入 `failed`；HTTP 400/401、`invalid_client`、`unauthorized_client` 和地区限制只返回 `error`，不改封禁状态。当前凭据和暂存都写不进去时，`items[].unsavedCredential` 带上本次新的 access token、refresh token、id token 和过期时间，供管理员立即保存；有效期未知或缺少刷新凭据返回原因。汇总状态与返回 `items` 均使用刷新后的数据库记录。
 
 ### 3.8 `GET /api/admin/accounts/:id/mailbox`
 

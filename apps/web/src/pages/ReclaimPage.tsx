@@ -6,13 +6,14 @@ import { downloadBlob, downloadText, errorMessage, getPublicMeta, reclaimCards }
 import {
   DELIVER_FORMAT_OPTIONS,
   isZipDeliverFormat,
+  selectDeliverFormat,
   type DeliverFormat,
   type PublicMeta,
   type RedeemResponse,
   type RedeemResult,
 } from '../api/types';
 import { timestampSuffix } from '../utils/format';
-import { buildZipBlob } from '../utils/zip';
+import { buildZipBlob, deliverDownloadEntries } from '../utils/zip';
 import { parseCards } from './RedeemPage';
 import './RedeemPage.css';
 
@@ -37,8 +38,7 @@ export default function ReclaimPage() {
       .then((data) => {
         if (cancelled) return;
         setMeta(data);
-        const preferred = data.formats.find((item) => item.value === DEFAULT_FORMAT)?.value ?? data.formats[0]?.value;
-        if (preferred) setFormat(preferred);
+        setFormat(selectDeliverFormat(data.formats, data.defaultFormat));
       })
       .catch(() => {
         if (!cancelled) setMeta(null);
@@ -65,18 +65,18 @@ export default function ReclaimPage() {
   const results: RedeemResult[] = response?.results ?? [];
   const isZipBatch = isZipDeliverFormat(response?.format, formatOptions);
   const hasBatch = isZipBatch
-    ? results.some((item) => item.ok && item.content)
+    ? deliverDownloadEntries(results, response?.format ?? format).length > 0
     : Boolean(response?.mergedContent);
 
   const handleSubmit = useCallback(async () => {
     if (cards.length === 0 || submitting) return;
-    const submitted = cards.slice(0, MAX_CARDS);
     if (cards.length > MAX_CARDS) {
-      void message.warning(`单次最多提交 ${MAX_CARDS} 张卡密，已截取前 ${MAX_CARDS} 张`);
+      void message.error(`单次最多提交 ${MAX_CARDS} 张卡密`);
+      return;
     }
     setSubmitting(true);
     try {
-      const data = await reclaimCards({ cards: submitted, format });
+      const data = await reclaimCards({ cards, format });
       setResponse(data);
       void message.success(`找回完成：成功 ${data.summary.success} 张，失败 ${data.summary.failed} 张`);
     } catch (error) {
@@ -88,18 +88,13 @@ export default function ReclaimPage() {
 
   const downloadAll = useCallback(() => {
     if (!response || !hasBatch) {
-      void message.warning('当前没有可下载的成功结果');
+      void message.warning('当前没有可下载的结果');
       return;
     }
     if (isZipBatch) {
-      const succeeded = results.filter((item) => item.ok && item.content);
-      const blob = buildZipBlob(
-        succeeded.map((item) => ({
-          name: item.filename ?? `${item.card}.${response.format}.json`,
-          content: item.content ?? '',
-        })),
-      );
-      downloadBlob(blob, `cardline-${response.format}-${timestampSuffix()}.zip`);
+      const entries = deliverDownloadEntries(results, response.format);
+      if (!entries.length) return;
+      downloadBlob(buildZipBlob(entries), `cardline-${response.format}-${timestampSuffix()}.zip`);
       return;
     }
     if (!response.mergedContent) return;
@@ -119,7 +114,7 @@ export default function ReclaimPage() {
             </p>
             <p className="footnote">
               <span className="footnote__mark">+</span>
-              不要在这里粘贴密码、JSON、邮箱或令牌。刷新失败时库里的旧凭据保持不变。
+              不要在这里粘贴密码、JSON、邮箱或令牌。还没换到新凭据时，失败不会改库。已经换到新凭据时，结果里会带上新文件，请马上保存，不要继续使用旧文件。
             </p>
           </div>
 

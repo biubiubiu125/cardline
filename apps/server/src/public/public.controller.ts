@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
+import { clientAddress } from '../common/utils';
 import { RedeemService, type PickupRecordInput } from './public.service';
 
 @Controller('public')
@@ -23,13 +24,48 @@ export class PublicController {
   }
 
   @Post('reclaim')
-  reclaim(@Body() body: Record<string, unknown>, @Req() request: Request) {
-    return this.service.reclaim({
-      cards: body?.cards,
-      format: typeof body?.format === 'string' ? body.format : undefined,
-      ip: clientIp(request),
-      userAgent: request.headers['user-agent'],
-    });
+  async reclaim(
+    @Body() body: Record<string, unknown>,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    let aborted = false;
+    const markAborted = () => {
+      if (!response.writableFinished) aborted = true;
+    };
+    const socket = request.socket;
+    response.on('close', markAborted);
+    socket?.on('close', markAborted);
+    const detachAbort = () => {
+      response.off('close', markAborted);
+      socket?.off('close', markAborted);
+    };
+    try {
+      const result = await this.service.reclaim({
+        cards: body?.cards,
+        format: typeof body?.format === 'string' ? body.format : undefined,
+        ip: clientIp(request),
+        userAgent: request.headers['user-agent'],
+        shouldStop: () => aborted,
+      });
+      if (!aborted) {
+        const cards: string[] = [];
+        if (Array.isArray(result?.results)) {
+          for (const item of result.results) {
+            if (item?.ok !== true || typeof item.card !== 'string') continue;
+            const key = item.card.trim();
+            if (key) cards.push(key);
+          }
+        }
+        response.on('finish', () => {
+          void this.service.releaseDeliveredHolds(cards);
+        });
+      }
+      return result;
+    } finally {
+      // close 只用于找回进行中的中断判断。长连接会复用 socket，不摘掉就会把旧响应留住。
+      detachAbort();
+    }
   }
 
   @Post('pickup/resolve')
@@ -73,7 +109,5 @@ export class PublicController {
 }
 
 function clientIp(request: Request): string {
-  const forwarded = request.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',')[0].trim();
-  return request.ip || request.socket?.remoteAddress || '';
+  return clientAddress(request.headers, request.ip || request.socket?.remoteAddress || '');
 }

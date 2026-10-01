@@ -39,6 +39,18 @@ export const DELIVER_FORMAT_OPTIONS: Array<{
   { value: 'email', label: '邮箱 TXT', ext: 'txt', bundle: 'document', hint: '邮箱凭据文本' },
 ];
 
+export function selectDeliverFormat(
+  formats: Array<{ value: string }> | undefined,
+  preferred?: string | null,
+): DeliverFormat {
+  const available = (formats ?? [])
+    .map((item) => item.value)
+    .filter((value): value is DeliverFormat => DELIVER_FORMAT_OPTIONS.some((item) => item.value === value));
+  if (preferred && available.includes(preferred as DeliverFormat)) return preferred as DeliverFormat;
+  if (available.includes('sub2api')) return 'sub2api';
+  return available[0] ?? 'sub2api';
+}
+
 export function isZipDeliverFormat(
   format: string | undefined,
   options?: Array<{ value: string; bundle?: DeliverBundle }>,
@@ -104,7 +116,9 @@ export type RedeemResultCode =
   | 'CREDITS_PENDING'
   | 'CARD_NOT_REDEEMED'
   | 'REFRESH_MISSING'
-  | 'REFRESH_FAILED';
+  | 'REFRESH_FAILED'
+  | 'PERSIST_FAILED'
+  | 'INTERNAL';
 
 /* ------------------------------------------------------------------ *
  * 1.1 GET /api/public/meta
@@ -141,6 +155,7 @@ export interface PublicMeta {
   redeemLimitPerCard: number;
   siteName: string;
   siteSubtitle: string;
+  defaultFormat?: DeliverFormat;
   formats: FormatOption[];
   creditTiers: number[];
   stats: PublicStats;
@@ -183,6 +198,8 @@ export interface RedeemResult {
   firstRedeem?: boolean;
   filename: string | null;
   content: string | null;
+  /** 一张卡多个会话账号时，每个账号一个文件。此时 content 为 null。 */
+  files?: Array<{ filename: string; content: string }> | null;
   accounts: RedeemAccount[];
 }
 
@@ -571,6 +588,13 @@ export interface RefreshStatusItem {
   redeemStatus: RedeemStatus;
   redeemedAt: string | null;
   error: string | null;
+  /** 新凭据没能落库时才有，供管理员立即保存 */
+  unsavedCredential?: {
+    accessToken: string;
+    refreshToken: string;
+    idToken: string | null;
+    expiresAt: string | null;
+  } | null;
 }
 
 export interface RefreshStatusResponse {

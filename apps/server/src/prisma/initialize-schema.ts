@@ -28,6 +28,10 @@ export async function initializeSchema(prisma: PrismaClient): Promise<void> {
       );
       await tx.$executeRawUnsafe('INSERT INTO "SchemaMigration" ("version") VALUES (1)');
     }
+    await tx.$executeRawUnsafe('ALTER TABLE "Account" ADD COLUMN IF NOT EXISTS "stagedCredential" TEXT');
+    await tx.$executeRawUnsafe(
+      'ALTER TABLE "Account" ADD COLUMN IF NOT EXISTS "refreshHeld" BOOLEAN NOT NULL DEFAULT false',
+    );
     await tx.$executeRawUnsafe(
       'CREATE INDEX IF NOT EXISTS "Account_redeemedByCard_idx" ON "Account"("redeemedByCard")',
     );

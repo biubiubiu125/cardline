@@ -39,6 +39,7 @@ import {
   batchDeleteAccounts,
   copyCard,
   downloadBlob,
+  downloadText,
   errorMessage,
   exportAccountsBlob,
   importAccounts,
@@ -719,6 +720,35 @@ function RefreshStatusModal({
                 兑换：已兑换 {result.redeem.redeemed} · 未兑换 {result.redeem.unredeemed} · 失败{' '}
                 {result.redeem.failed}
               </div>
+            ) : null}
+            {result.items.some((item) => item.error) ? (
+              <div style={{ marginTop: 8, fontSize: 12.5, color: '#8A4B3A' }}>
+                {result.items
+                  .filter((item) => item.error)
+                  .map((item) => (
+                    <div key={item.id}>
+                      {item.name || item.id}：{item.error}
+                    </div>
+                  ))}
+              </div>
+            ) : null}
+            {result.items.some((item) => item.unsavedCredential) ? (
+              <Button
+                style={{ marginTop: 8 }}
+                icon={<DownloadOutlined />}
+                onClick={() => {
+                  const payload = result.items
+                    .filter((item) => item.unsavedCredential)
+                    .map((item) => ({
+                      id: item.id,
+                      name: item.name || null,
+                      ...item.unsavedCredential,
+                    }));
+                  downloadText(JSON.stringify(payload, null, 2), `unsaved-credentials-${Date.now()}.json`);
+                }}
+              >
+                下载未落库凭据
+              </Button>
             ) : null}
           </div>
         ) : null}
